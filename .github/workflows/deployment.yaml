@@ -1,0 +1,385 @@
+name: Deployment
+
+# Called only after Integration succeeds on master. A published version is a
+# no-op; the first successful run for a new version publishes the artifacts.
+env:
+  RELEASE_BRANCH: master
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve release version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      run: ${{ steps.resolve.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide whether this commit is released
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          # Plain MAJOR.MINOR.PATCH only (no leading zeros). Prerelease (-rc.1)
+          # would be pushed as `latest` and published as a normal release, and
+          # build metadata (+meta) is not a valid image tag character.
+          if ! [[ "$V" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Cargo.toml version '$V' must be plain MAJOR.MINOR.PATCH; prerelease and build-metadata versions are not supported by this workflow (they would be tagged latest / produce invalid image tags)."
+            exit 1
+          fi
+          T="v${V}"
+          {
+            echo "version=$V"
+            echo "tag=$T"
+          } >> "$GITHUB_OUTPUT"
+
+          skip() {
+            echo "::notice::$1"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # gh api exits non-zero on any error; only a 404 means "absent".
+          is_absent() { grep -q 'HTTP 404' "$1"; }
+
+          if [ "$GITHUB_REF" != "refs/heads/${RELEASE_BRANCH}" ]; then
+            skip "Ref $GITHUB_REF is not ${RELEASE_BRANCH}; nothing to release."
+          fi
+
+          HEAD_SHA=$(gh api "repos/${REPO}/commits/${RELEASE_BRANCH}" --jq .sha)
+          if [ "$HEAD_SHA" != "$GITHUB_SHA" ]; then
+            skip "$GITHUB_SHA is not the head of ${RELEASE_BRANCH} ($HEAD_SHA); only the newest commit is released."
+          fi
+
+          ERR=$(mktemp)
+          if gh api "repos/${REPO}/releases/tags/${T}" --jq .tag_name >/dev/null 2>"$ERR"; then
+            skip "Release ${T} is already published; nothing to do."
+          elif ! is_absent "$ERR"; then
+            cat "$ERR"
+            echo "::error::Could not query release ${T}"
+            exit 1
+          fi
+
+          if gh api "repos/${REPO}/git/ref/tags/${T}" --jq .ref >/dev/null 2>"$ERR"; then
+            TAG_COMMIT=$(gh api "repos/${REPO}/commits/${T}" --jq .sha)
+            if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag ${T} exists at ${TAG_COMMIT} but has no published release, and master is at ${GITHUB_SHA}. Stale or manual tag: delete or fix it manually."
+              exit 1
+            fi
+          elif ! is_absent "$ERR"; then
+            cat "$ERR"
+            echo "::error::Could not query tag ${T}"
+            exit 1
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: Binary (${{ matrix.target }})
+    needs: version
+    if: needs.version.outputs.run == 'true'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            platform: linux/amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            platform: linux/arm64
+    env:
+      V: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        if: runner.os == 'macOS'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Build (macOS, native)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "$TARGET"
+          mkdir -p out
+          cp "target/${TARGET}/release/hackerone-mcp" out/hackerone-mcp
+
+      - name: Set up Docker Buildx
+        if: runner.os == 'Linux'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Built in the Debian bookworm toolchain (glibc 2.36) on a native runner.
+      - name: Build (Linux, Docker artifact stage)
+        if: runner.os == 'Linux'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          docker buildx build --target artifact --platform "$PLATFORM" \
+            --output type=local,dest=out .
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          OUT=$(./out/hackerone-mcp --version)
+          echo "$OUT"
+          if [ "$OUT" != "hackerone-mcp ${V}" ]; then
+            echo "::error::Unexpected --version output: '$OUT' (expected 'hackerone-mcp ${V}')"
+            exit 1
+          fi
+
+      - name: Ensure GNU tar (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          command -v gtar >/dev/null || brew install gnu-tar
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = macOS ]; then TAR=gtar; else TAR=tar; fi
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          NAME="hackerone-mcp-v${V}-${TARGET}"
+          mkdir -p stage dist
+          cp out/hackerone-mcp LICENSE README.md stage/
+          chmod 755 stage/hackerone-mcp
+          chmod 644 stage/LICENSE stage/README.md
+          "$TAR" --sort=name --mtime="@${SOURCE_DATE_EPOCH}" \
+            --owner=0 --group=0 --numeric-owner \
+            -C stage -cf - hackerone-mcp LICENSE README.md | gzip -n > "dist/${NAME}.tar.gz"
+          (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          cat "dist/${NAME}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    name: Container image
+    needs: [version, binaries]
+    if: needs.version.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Confirm master still points to this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(gh api "repos/${REPO}/commits/${RELEASE_BRANCH}" --jq .sha)
+          if [ "$HEAD_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::master moved to ${HEAD_SHA}; refusing to push image for ${GITHUB_SHA}"
+            exit 1
+          fi
+
+      # Build once under a commit-specific tag. Mutable release tags are added
+      # only after the archives and draft release have been verified.
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=sha,prefix=sha-,format=long
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: push
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  release:
+    name: Publish release
+    needs: [version, binaries, image]
+    if: needs.version.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REPO: ${{ github.repository }}
+      V: ${{ needs.version.outputs.version }}
+      T: ${{ needs.version.outputs.tag }}
+      IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Assemble SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          cat ./*.tar.gz.sha256 | LC_ALL=C sort -k2 > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+          rm ./*.tar.gz.sha256
+          cat SHA256SUMS
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Refuse to replace an existing draft
+        run: |
+          set -euo pipefail
+          DRAFTS=$(gh api --paginate "repos/${REPO}/releases?per_page=100" \
+            | jq -r --arg t "$T" '.[] | select(.draft == true and .tag_name == $t) | .id')
+          if [ -n "$DRAFTS" ]; then
+            echo "::error::Draft release ${T} already exists (id: ${DRAFTS//$'\n'/, }). Inspect it and remove it manually before retrying."
+            exit 1
+          fi
+
+      - name: Create draft release and upload assets
+        run: |
+          set -euo pipefail
+          MARKER="<!-- hackerone-mcp-deployment:${GITHUB_SHA} -->"
+          gh release create "$T" --draft --target "$GITHUB_SHA" --title "$T" --generate-notes \
+            --notes "$MARKER" \
+            dist/*.tar.gz dist/SHA256SUMS
+
+      - name: Verify draft assets
+        run: |
+          set -euo pipefail
+          for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            echo "hackerone-mcp-v${V}-${t}.tar.gz"
+          done > expected.txt
+          echo SHA256SUMS >> expected.txt
+          LC_ALL=C sort expected.txt > expected.sorted
+          gh release view "$T" --json assets --jq '.assets[].name' | LC_ALL=C sort > actual.sorted
+          diff expected.sorted actual.sorted
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote verified image to version and latest tags
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(gh api "repos/${REPO}/commits/${RELEASE_BRANCH}" --jq .sha)
+          if [ "$HEAD_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::master moved to ${HEAD_SHA}; leaving ${T} as a draft"
+            exit 1
+          fi
+          IMAGE="ghcr.io/${REPO,,}"
+          if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Image build did not return a SHA-256 digest"
+            exit 1
+          fi
+          SOURCE="${IMAGE}@${IMAGE_DIGEST}"
+          docker buildx imagetools inspect "$SOURCE" --raw \
+            | jq -e '[.manifests[]?.platform | select(.os == "linux") | .architecture]
+                | (index("amd64") != null and index("arm64") != null)' >/dev/null
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${V}" --tag "${IMAGE}:${T}" --tag "${IMAGE}:latest" \
+            "$SOURCE"
+          for TAG in "$V" "$T" latest; do
+            GOT=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')
+            if [ "$GOT" != "$IMAGE_DIGEST" ]; then
+              echo "::error::${IMAGE}:${TAG} resolves to ${GOT}, expected ${IMAGE_DIGEST}"
+              exit 1
+            fi
+          done
+
+      - name: Publish and verify
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(gh api "repos/${REPO}/commits/${RELEASE_BRANCH}" --jq .sha)
+          if [ "$HEAD_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::master moved to ${HEAD_SHA}; leaving ${T} as a draft"
+            exit 1
+          fi
+          ERR=$(mktemp)
+          if gh api "repos/${REPO}/git/ref/tags/${T}" --jq .ref >/dev/null 2>"$ERR"; then
+            TAG_COMMIT=$(gh api "repos/${REPO}/commits/${T}" --jq .sha)
+            if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag ${T} appeared at ${TAG_COMMIT}, expected ${GITHUB_SHA}; refusing to publish."
+              exit 1
+            fi
+          elif ! grep -q 'HTTP 404' "$ERR"; then
+            cat "$ERR"
+            exit 1
+          fi
+
+          gh release edit "$T" --draft=false
+
+          TAG_COMMIT=$(gh api "repos/${REPO}/commits/${T}" --jq .sha)
+          if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+            echo "::error::Tag ${T} resolves to ${TAG_COMMIT}, expected ${GITHUB_SHA}"
+            exit 1
+          fi
+          DRAFT=$(gh api "repos/${REPO}/releases/tags/${T}" --jq .draft)
+          if [ "$DRAFT" != "false" ]; then
+            echo "::error::Release ${T} is still a draft"
+            exit 1
+          fi
+          echo "Published ${T} at ${GITHUB_SHA}"
