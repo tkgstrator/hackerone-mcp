@@ -1,0 +1,10 @@
+disallowed-methods = [
+    { path = "reqwest::Client::post", reason = "hackerone-mcp is read-only toward HackerOne; only GET via client.rs" },
+    { path = "reqwest::Client::put", reason = "hackerone-mcp is read-only toward HackerOne; only GET via client.rs" },
+    { path = "reqwest::Client::patch", reason = "hackerone-mcp is read-only toward HackerOne; only GET via client.rs" },
+    { path = "reqwest::Client::delete", reason = "hackerone-mcp is read-only toward HackerOne; only GET via client.rs" },
+    { path = "reqwest::Client::request", reason = "hackerone-mcp is read-only toward HackerOne; only GET via client.rs" },
+    { path = "reqwest::Client::execute", reason = "hackerone-mcp is read-only toward HackerOne; only GET via client.rs" },
+    { path = "reqwest::Request::new", reason = "hackerone-mcp is read-only toward HackerOne; only GET via client.rs" },
+    { path = "reqwest::Request::method_mut", reason = "hackerone-mcp is read-only toward HackerOne; only GET via client.rs" },
+]

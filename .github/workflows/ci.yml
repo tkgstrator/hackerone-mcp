@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # SHA of the tip of the `stable` branch (that action is versioned by branch).
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Dependency policy (cargo deny)
+        run: cargo deny check
+
+      - name: Advisories (cargo audit)
+        run: cargo audit
+
+      - name: HTTP client guard
+        run: |
+          set -eu
+          cargo metadata --no-deps --format-version 1 \
+            | jq -e '
+                [.packages[].dependencies[].name]
+                | map(select(. == "hyper" or . == "ureq" or . == "isahc" or . == "surf"
+                    or . == "attohttpc" or . == "curl" or . == "minreq"))
+                | length == 0' >/dev/null \
+            || { echo "forbidden direct HTTP dependency declared"; exit 1; }
