@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::config::Credentials;
 use crate::error::{Error, Result};
+pub(crate) use endpoint::validate_handle;
 use endpoint::{Endpoint, MAX_PAGE_SIZE};
 pub use endpoint::{PageParams, ScopeFilters};
 use retry::{RetryPolicy, parse_retry_after};
@@ -133,21 +134,29 @@ impl H1Client {
 
     /// All structured scopes, bounded by page and byte limits. `links.next` is never followed.
     pub async fn structured_scopes_all(&self, handle: &str) -> Result<Paged> {
+        self.structured_scopes_bounded(handle, self.limits.pages)
+            .await
+    }
+
+    /// Structured scopes with a smaller per-call page budget; existing byte/retry limits apply.
+    pub async fn structured_scopes_bounded(&self, handle: &str, max_pages: usize) -> Result<Paged> {
         let filters = ScopeFilters::default();
-        self.collect_pages(|number| Endpoint::StructuredScopes {
-            handle,
-            page: PageParams {
-                number: Some(number),
-                size: Some(MAX_PAGE_SIZE),
-            },
-            filters: &filters,
+        self.collect_pages(max_pages.min(self.limits.pages), |number| {
+            Endpoint::StructuredScopes {
+                handle,
+                page: PageParams {
+                    number: Some(number),
+                    size: Some(MAX_PAGE_SIZE),
+                },
+                filters: &filters,
+            }
         })
         .await
     }
 
     /// All weaknesses, bounded by page and byte limits.
     pub async fn weaknesses_all(&self, handle: &str) -> Result<Paged> {
-        self.collect_pages(|number| Endpoint::Weaknesses {
+        self.collect_pages(self.limits.pages, |number| Endpoint::Weaknesses {
             handle,
             page: PageParams {
                 number: Some(number),
@@ -157,11 +166,15 @@ impl H1Client {
         .await
     }
 
-    async fn collect_pages<'a>(&self, make: impl Fn(u32) -> Endpoint<'a>) -> Result<Paged> {
+    async fn collect_pages<'a>(
+        &self,
+        pages: usize,
+        make: impl Fn(u32) -> Endpoint<'a>,
+    ) -> Result<Paged> {
         let mut items = Vec::new();
         let mut total = 0usize;
-        let mut truncated = false;
-        for i in 0..self.limits.pages {
+        let mut truncated = pages == 0;
+        for i in 0..pages {
             let number = u32::try_from(i + 1).unwrap_or(u32::MAX);
             let (body, len) = self.get_json(&make(number)).await?;
             total += len;
@@ -169,17 +182,20 @@ impl H1Client {
                 truncated = true;
                 break;
             }
-            let page_items = body
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+            let page_items = body.get("data").and_then(Value::as_array).ok_or_else(|| {
+                Error::Http("malformed API collection: expected data array".into())
+            })?;
+            if page_items.len() > MAX_PAGE_SIZE as usize {
+                return Err(Error::Http(
+                    "API collection exceeded requested page size".into(),
+                ));
+            }
             let n = page_items.len();
-            items.extend(page_items);
+            items.extend(page_items.iter().cloned());
             if n < MAX_PAGE_SIZE as usize {
                 return Ok(Paged { items, truncated });
             }
-            if i + 1 == self.limits.pages {
+            if i + 1 == pages {
                 truncated = true;
             }
         }

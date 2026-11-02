@@ -8,7 +8,7 @@ if [ "$#" -ne 1 ] || [ -z "$1" ]; then
   exit 2
 fi
 image="$1"
-expected_tools=12
+expected_tools=13
 step_timeout=60
 
 command -v jq >/dev/null || { echo "smoke: jq is required" >&2; exit 2; }

@@ -140,7 +140,8 @@ fn private_dir() -> tempfile::TempDir {
     d
 }
 
-const EXPECTED: [&str; 12] = [
+const EXPECTED: [&str; 13] = [
+    "program_discover",
     "program_list",
     "program_get",
     "program_scope",
@@ -221,6 +222,11 @@ fn program_tool_without_credentials_is_a_clear_error() {
     s.handshake();
     let e = s.call("program_list", json!({})).unwrap_err();
     assert!(e.contains("H1_USERNAME") && e.contains("H1_API_KEY"), "{e}");
+    let discovery = s.call("program_discover", json!({})).unwrap_err();
+    assert!(
+        discovery.contains("H1_USERNAME") && discovery.contains("H1_API_KEY"),
+        "{discovery}"
+    );
     // The server must still be alive afterwards.
     assert!(s.call("draft_list", json!({})).is_ok());
     let (_lines, err) = s.finish();

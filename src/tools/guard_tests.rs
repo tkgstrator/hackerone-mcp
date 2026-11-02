@@ -6,7 +6,8 @@ use tempfile::TempDir;
 
 use super::*;
 
-const EXPECTED: [&str; 12] = [
+const EXPECTED: [&str; 13] = [
+    "program_discover",
     "program_list",
     "program_get",
     "program_scope",
@@ -35,7 +36,7 @@ fn names() -> (TempDir, Vec<String>) {
 }
 
 #[test]
-fn tool_set_is_exactly_the_expected_twelve() {
+fn tool_set_is_exactly_the_expected_thirteen() {
     let (_t, n) = names();
     let got: BTreeSet<&str> = n.iter().map(String::as_str).collect();
     let want: BTreeSet<&str> = EXPECTED.into_iter().collect();
