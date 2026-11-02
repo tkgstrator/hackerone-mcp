@@ -9,7 +9,7 @@ HackerOne Hacker API (read-only) and stores drafts as files on your machine.
 This server does **not** submit, send, or publish reports, and it is built so that it cannot:
 - The only HTTP client code lives in `src/client/` and only issues `GET` requests to the fixed origin
   `https://api.hackerone.com`.
-- There is no submit tool. A test (`src/tools/guard_tests.rs`) pins the exact set of 12 tools and
+- There is no submit tool. A test (`src/tools/guard_tests.rs`) pins the exact set of 13 tools and
   asserts no tool name contains `submit`, `send`, `post`, `publish`, `upload` or `report_remote`.
 - `draft_validate` only shows a preview of the request body that _would_ be sent; it is marked
   `never_sent`.
@@ -20,6 +20,7 @@ You review the draft and submit it yourself in the HackerOne web UI.
 
 | Tool                         | Description                                                     | Parameters                                                                                                                                                                                     |
 | ---------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `program_discover`           | Discover eligible iOS programs from a bounded source page       | `page`, `page_size`, `public_only`, `accepting_submissions_only`, `bounty_only` |
 | `program_list`               | List programs visible to your account (needs credentials)       | `page`, `page_size`                                                                                                                                                                            |
 | `program_get`                | Get one program incl. policy and submission state               | `handle`                                                                                                                                                                                       |
 | `program_scope`              | List a program's structured scopes (assets)                     | `handle`, `page`, `page_size`, `id_gt`, `created_at_gt`, `updated_at_gt`                                                                                                                       |
@@ -36,6 +37,52 @@ You review the draft and submit it yourself in the HackerOne web UI.
 The `program_*` tools need HackerOne credentials; the `draft_*` tools work without them.
 `weakness_id` and `structured_scope_id` are HackerOne's integer ids (take them from
 `program_submission_options`), not CWE numbers.
+
+## Discovering iOS programs
+
+Call `program_discover` with `{}` to inspect the first five programs visible to your account.
+The default local filters require `state=public_mode`, `submission_state=open`, and
+`offers_bounties=true`. A candidate needs at least one scope whose type is
+`APPLE_STORE_APP_ID`, `TESTFLIGHT`, or `OTHER_IPA`, with both `eligible_for_submission`
+and `eligible_for_bounty` explicitly true. Missing flags stay `null` and cannot satisfy a
+required eligibility check.
+
+Pagination applies to the **source program list before filtering**. For example:
+
+```json
+{"page": 1, "page_size": 5}
+```
+
+Read `data.source_page.next_page` and pass that number as `page` in the next call, keeping
+the same `page_size` and filters. An empty `data.candidates` array can still have a next page.
+Pages range from 1 to 1000 and page sizes from 1 to 10. A full page 1000 is marked
+`truncated`; a short page stops continuation. Response-provided pagination links are never followed.
+
+To include private programs, paused programs, and programs or scopes without bounty eligibility:
+
+```json
+{"public_only": false, "accepting_submissions_only": false, "bounty_only": false}
+```
+
+A qualifying scope always needs `eligible_for_submission=true`. Each candidate retains its
+published iOS scopes, including their identifiers, instructions, update times and eligibility
+flags. `matches_filters` identifies the scopes that qualify under the selected filters.
+
+Discovery reads scopes sequentially, at most three pages of 100 per candidate program, within
+one 45-second tool deadline and a 5 MiB output ceiling. Existing response-byte and retry limits
+also apply. `data.incomplete_programs` gives source indexes, handles and reasons when a program
+cannot be fully inspected, including scope limits, malformed data, request errors, deadline
+exhaustion or the output limit. Earlier successful candidates are retained. `scopes_complete`
+marks each returned candidate's scope coverage; `data.source_page_complete` describes inspection
+of this source page, not coverage of every program or subsequent source pages. Unvisited scope
+pages may contain additional qualifying assets.
+
+The response includes source URLs, `retrieved_at_unix` and an untrusted-source marker. Read the
+current program policy before testing: published API flags do not override policy or prove
+permission. Bounty eligibility describes eligibility, not a payment amount. The response sets
+`bounty_amount_status=not_available_in_hacker_api`; it does not infer numeric rewards from
+severity, earnings or policy headlines. The Hacker API does not document a bounty-table endpoint;
+the separate Customer API requires program-management access and is not used here.
 
 ## Running with Docker
 
@@ -228,7 +275,7 @@ bun install --frozen-lockfile --ignore-scripts && bunx commitlint --last --verbo
 ```
 
 `tests/stdio_e2e.rs` spawns the real binary and talks JSON-RPC over stdio. `scripts/docker-smoke.sh`
-starts the image, checks `initialize`, that `tools/list` returns 12 tools, and a `draft_create` /
+starts the image, checks `initialize`, that `tools/list` returns 13 tools, and a `draft_create` /
 `draft_get` round trip.
 
 ### Commits

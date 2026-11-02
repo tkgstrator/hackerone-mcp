@@ -50,3 +50,18 @@ pub struct ScopeParams {
 pub fn page(number: Option<u32>, size: Option<u32>) -> PageParams {
     PageParams { number, size }
 }
+
+/// Parameters for bounded iOS program discovery.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiscoverParams {
+    /// Source program page, 1..=1000; defaults to 1.
+    pub page: Option<u32>,
+    /// Programs per source page, 1..=10; defaults to 5.
+    pub page_size: Option<u32>,
+    /// Require public_mode; defaults to true.
+    pub public_only: Option<bool>,
+    /// Require open submissions; defaults to true.
+    pub accepting_submissions_only: Option<bool>,
+    /// Require program and scope bounty eligibility; defaults to true.
+    pub bounty_only: Option<bool>,
+}

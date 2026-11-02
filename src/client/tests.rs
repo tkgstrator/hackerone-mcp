@@ -358,3 +358,55 @@ async fn third_attempt_not_started_after_budget_spent() {
     );
     assert!(server.received_requests().await.unwrap().len() == 2);
 }
+
+#[tokio::test]
+async fn smaller_scope_budget_does_not_change_existing_callers_page_budget() {
+    // Break caught: discovery making twenty scope requests, or shrinking existing tools to three.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": vec![json!({"id":"1","attributes":{"asset_type":"URL"}});100],
+            "links":{"next":"https://evil.example/steal"}
+        })))
+        .mount(&server)
+        .await;
+    let c = client(&server);
+    let found = c.structured_scopes_bounded("acme", 3).await.unwrap();
+    assert!(found.truncated);
+    assert_eq!(found.items.len(), 300);
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    c.structured_scopes_all("acme").await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 23);
+}
+
+#[tokio::test]
+async fn malformed_paged_collection_is_not_silently_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":null})))
+        .mount(&server)
+        .await;
+    assert!(
+        client(&server)
+            .structured_scopes_bounded("acme", 3)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn oversized_scope_page_is_not_accepted_as_complete_data() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":vec![json!({"id":"1"});101]})),
+        )
+        .mount(&server)
+        .await;
+    let err = client(&server)
+        .structured_scopes_bounded("acme", 3)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("exceeded requested page size"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}

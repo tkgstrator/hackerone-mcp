@@ -17,7 +17,7 @@ fn drafts_dir(dir: &tempfile::TempDir) -> std::path::PathBuf {
     p
 }
 
-fn server_with(base: Option<&str>) -> (HackerOneServer, tempfile::TempDir) {
+pub(super) fn server_with(base: Option<&str>) -> (HackerOneServer, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let client = base.map(|b| {
         let c = Credentials {
