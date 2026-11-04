@@ -140,7 +140,9 @@ fn private_dir() -> tempfile::TempDir {
     d
 }
 
-const EXPECTED: [&str; 13] = [
+const EXPECTED: [&str; 15] = [
+    "report_list",
+    "report_get",
     "program_discover",
     "program_list",
     "program_get",
@@ -216,7 +218,7 @@ fn draft_lifecycle_over_stdio_without_credentials() {
 }
 
 #[test]
-fn program_tool_without_credentials_is_a_clear_error() {
+fn api_tools_without_credentials_return_clear_errors() {
     let dir = private_dir();
     let mut s = Server::spawn(dir.path(), None);
     s.handshake();
@@ -227,6 +229,16 @@ fn program_tool_without_credentials_is_a_clear_error() {
         discovery.contains("H1_USERNAME") && discovery.contains("H1_API_KEY"),
         "{discovery}"
     );
+    for (name, args) in [
+        ("report_list", json!({})),
+        ("report_get", json!({"report_id":"123"})),
+    ] {
+        let error = s.call(name, args).unwrap_err();
+        assert!(
+            error.contains("H1_USERNAME") && error.contains("H1_API_KEY"),
+            "{name}: {error}"
+        );
+    }
     // The server must still be alive afterwards.
     assert!(s.call("draft_list", json!({})).is_ok());
     let (_lines, err) = s.finish();

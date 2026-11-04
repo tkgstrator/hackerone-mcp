@@ -1,18 +1,8 @@
-//! Builders for JSON envelopes and the derived submission-options summary.
+//! Builder for the derived submission-options summary.
 
 use serde_json::{Value, json};
 
 use crate::client::Paged;
-
-/// Wrap API-derived data. Server-generated guidance must go outside `data`.
-pub fn envelope(endpoint: &str, data: Value) -> Value {
-    json!({
-        "source": "hackerone_api",
-        "untrusted_content": true,
-        "endpoint": endpoint,
-        "data": data,
-    })
-}
 
 fn attr<'a>(item: &'a Value, key: &str) -> Option<&'a Value> {
     item.get("attributes")?.get(key)

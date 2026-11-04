@@ -1,8 +1,6 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::client::PageParams;
-
 /// Parameters for `program_list`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListParams {
@@ -45,10 +43,6 @@ pub struct ScopeParams {
     pub created_at_gt: Option<String>,
     /// Only scopes updated after this RFC3339 timestamp, e.g. 2024-01-31T00:00:00Z.
     pub updated_at_gt: Option<String>,
-}
-
-pub fn page(number: Option<u32>, size: Option<u32>) -> PageParams {
-    PageParams { number, size }
 }
 
 /// Parameters for bounded iOS program discovery.

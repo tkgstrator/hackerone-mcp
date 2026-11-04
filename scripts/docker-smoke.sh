@@ -8,7 +8,7 @@ if [ "$#" -ne 1 ] || [ -z "$1" ]; then
   exit 2
 fi
 image="$1"
-expected_tools=13
+expected_tools=15
 step_timeout=60
 
 command -v jq >/dev/null || { echo "smoke: jq is required" >&2; exit 2; }
@@ -79,6 +79,10 @@ send '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 list="$(await 2)"
 count="$(echo "$list" | jq '.result.tools | length')" || fail "tools/list malformed: $list"
 [ "$count" = "$expected_tools" ] || fail "expected $expected_tools tools, got $count"
+for tool in report_list report_get; do
+  echo "$list" | jq -e --arg t "$tool" '[.result.tools[].name] | index($t) != null' >/dev/null \
+    || fail "tools/list is missing $tool"
+done
 
 send '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"draft_create","arguments":{"title":"smoke test"}}}'
 created="$(await 3)"

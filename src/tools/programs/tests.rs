@@ -7,6 +7,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::params::{HandlePageParams, HandleParams, ListParams, ScopeParams};
 use super::*;
+use crate::client::H1Client;
 use crate::config::Credentials;
 use crate::draft::DraftStore;
 
@@ -17,7 +18,7 @@ fn drafts_dir(dir: &tempfile::TempDir) -> std::path::PathBuf {
     p
 }
 
-pub(super) fn server_with(base: Option<&str>) -> (HackerOneServer, tempfile::TempDir) {
+pub(crate) fn server_with(base: Option<&str>) -> (HackerOneServer, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let client = base.map(|b| {
         let c = Credentials {
