@@ -1,6 +1,6 @@
 use super::*;
 use serde_json::json;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{basic_auth, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const BODY: &str =
@@ -28,7 +28,7 @@ async fn post_sends_exact_approved_bytes_with_json_and_account_auth() {
         .and(path("/v1/hackers/reports"))
         .and(header("accept", "application/json"))
         .and(header("content-type", "application/json"))
-        .and(header("authorization", "Basic dGVzdF91c2VyOnRlc3Rfa2V5"))
+        .and(basic_auth("test_user", "test_key"))
         .respond_with(ResponseTemplate::new(201).set_body_json(accepted()))
         .expect(1)
         .mount(&server)
