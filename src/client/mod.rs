@@ -1,7 +1,9 @@
-//! The only module that builds or sends HTTP requests. GET only, fixed origin,
-//! typed endpoints, bounded retries/pagination/response sizes.
+//! The only module that builds or sends HTTP requests. Fixed origin and typed
+//! endpoints, bounded GET retries/pagination/response sizes, and one-shot report POST.
 
 mod endpoint;
+#[cfg(test)]
+mod post_tests;
 mod retry;
 #[cfg(test)]
 mod tests;
@@ -14,9 +16,9 @@ use serde_json::Value;
 
 use crate::config::Credentials;
 use crate::error::{Error, Result};
-pub(crate) use endpoint::validate_handle;
 use endpoint::{Endpoint, MAX_PAGE_SIZE};
 pub use endpoint::{PageParams, ScopeFilters};
+pub(crate) use endpoint::{validate_handle, validate_report_id};
 use retry::{RetryPolicy, parse_retry_after};
 
 const ORIGIN: &str = "https://api.hackerone.com";
@@ -42,6 +44,7 @@ pub struct Paged {
 
 pub struct H1Client {
     http: reqwest::Client,
+    post_http: reqwest::Client,
     username: String,
     api_key: String,
     origin: Url,
@@ -58,21 +61,28 @@ impl std::fmt::Debug for H1Client {
 }
 
 impl H1Client {
+    pub fn account_username(&self) -> &str {
+        &self.username
+    }
+
     pub fn new(creds: &Credentials) -> Result<Self> {
         let origin = Url::parse(ORIGIN).map_err(|e| Error::Config(e.to_string()))?;
         Self::build(creds, origin, RetryPolicy::default(), Limits::production())
     }
 
     fn build(creds: &Credentials, origin: Url, retry: RetryPolicy, limits: Limits) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("hackerone-mcp/", env!("CARGO_PKG_VERSION")))
-            .redirect(Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(retry.request_timeout)
+        let http = http_builder(retry.request_timeout)
             .build()
             .map_err(|_| Error::Config("failed to build HTTP client".into()))?;
+        // reqwest retries protocol NACKs by default. A separate client makes
+        // the report POST's no-retry policy explicit without changing GETs.
+        let post_http = http_builder(retry.request_timeout)
+            .retry(reqwest::retry::never())
+            .build()
+            .map_err(|_| Error::Config("failed to build submission HTTP client".into()))?;
         Ok(Self {
             http,
+            post_http,
             username: creds.username.clone(),
             api_key: creds.api_key.clone(),
             origin,
@@ -107,6 +117,57 @@ impl H1Client {
 
     pub async fn report(&self, id: &str) -> Result<Value> {
         self.get_json(&Endpoint::Report { id }).await.map(|r| r.0)
+    }
+
+    /// Send exactly the previously approved bytes, once. The caller must have
+    /// durably consumed its submission record before invoking this method.
+    /// No error includes API response text, request bytes or credentials.
+    pub async fn submit_report(&self, body: String) -> Result<Value> {
+        let url = Endpoint::CreateReport.url(&self.origin)?;
+        tokio::time::timeout(self.retry.request_timeout, async {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the sole typed report POST uses a durable claim, explicit opt-in and no retries"
+            )]
+            let response = self
+                .post_http
+                .post(url)
+                .basic_auth(&self.username, Some(&self.api_key))
+                .header(reqwest::header::ACCEPT, "application/json")
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .send()
+                .await
+                .map_err(|_| submission_uncertain("transport failure"))?;
+            let status = response.status();
+            if !status.is_success() {
+                // Do not read or quote an error body: it can echo the report.
+                return Err(submission_uncertain(&format!("HTTP {}", status.as_u16())));
+            }
+            let bytes = self.read_body(response).await.map_err(|_| {
+                submission_uncertain(&format!(
+                    "HTTP {} response unreadable or over size limit",
+                    status.as_u16()
+                ))
+            })?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+                submission_uncertain(&format!("HTTP {} invalid JSON response", status.as_u16()))
+            })?;
+            let valid = value.pointer("/data/type").and_then(Value::as_str) == Some("report")
+                && value
+                    .pointer("/data/id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| validate_report_id(id).is_ok());
+            if !valid {
+                return Err(submission_uncertain(&format!(
+                    "HTTP {} invalid report receipt",
+                    status.as_u16()
+                )));
+            }
+            Ok(value)
+        })
+        .await
+        .map_err(|_| submission_uncertain("request timed out"))?
     }
 
     pub async fn program(&self, handle: &str) -> Result<Value> {
@@ -332,6 +393,20 @@ impl H1Client {
 
 fn budget_exhausted() -> Error {
     Error::Http("request budget exhausted (total time cap reached)".into())
+}
+
+fn http_builder(timeout: Duration) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(concat!("hackerone-mcp/", env!("CARGO_PKG_VERSION")))
+        .redirect(Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(timeout)
+}
+
+fn submission_uncertain(reason: &str) -> Error {
+    Error::Http(format!(
+        "submission {reason}; outcome uncertain; inspect HackerOne before any new submission"
+    ))
 }
 
 enum Failure {

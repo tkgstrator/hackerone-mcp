@@ -25,6 +25,7 @@ impl Server {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_hackerone-mcp"));
         cmd.env_remove("H1_USERNAME");
         cmd.env_remove("H1_API_KEY");
+        cmd.env_remove("H1_MCP_ALLOW_SUBMIT");
         cmd.env("H1_MCP_DRAFTS_DIR", dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -140,9 +141,15 @@ fn private_dir() -> tempfile::TempDir {
     d
 }
 
-const EXPECTED: [&str; 15] = [
+const EXPECTED: [&str; 21] = [
     "report_list",
     "report_get",
+    "report_updates",
+    "report_reply_draft",
+    "report_reply_draft_get",
+    "report_submit_prepare",
+    "report_submit",
+    "report_submission_get",
     "program_discover",
     "program_list",
     "program_get",
@@ -157,6 +164,68 @@ const EXPECTED: [&str; 15] = [
     "draft_delete",
     "draft_validate",
 ];
+
+#[test]
+fn reply_draft_survives_stdio_restart_without_credentials() {
+    let dir = private_dir();
+    let mut first = Server::spawn(dir.path(), None);
+    first.handshake();
+    let created = first
+        .call(
+            "report_reply_draft",
+            json!({
+                "report_id":"12345", "message":"Thank you. I can provide more details."
+            }),
+        )
+        .expect("reply draft should be stored locally");
+    assert_eq!(
+        created["reply"]["message"],
+        "Thank you. I can provide more details."
+    );
+    assert_eq!(created["report_url"], "https://hackerone.com/reports/12345");
+    first.finish();
+    let mut second = Server::spawn(dir.path(), None);
+    second.handshake();
+    let read = second
+        .call("report_reply_draft_get", json!({"report_id":"12345"}))
+        .unwrap();
+    assert_eq!(read["reply"]["message"], created["reply"]["message"]);
+    assert_eq!(read["never_sent"], true);
+    second.finish();
+}
+
+#[test]
+fn submission_is_disabled_without_explicit_opt_in_over_stdio() {
+    let dir = private_dir();
+    let mut s = Server::spawn(dir.path(), Some(("fake-user", "fake-key")));
+    s.handshake();
+    let error = s
+        .call(
+            "report_submit",
+            json!({
+                "draft_id":"unsent", "expected_revision":1,
+                "confirmation_token":"not-a-preview", "confirm":true
+            }),
+        )
+        .unwrap_err();
+    assert!(error.contains("H1_MCP_ALLOW_SUBMIT"), "{error}");
+    s.finish();
+}
+
+#[test]
+fn report_updates_requires_credentials_over_stdio() {
+    let dir = private_dir();
+    let mut s = Server::spawn(dir.path(), None);
+    s.handshake();
+    let error = s
+        .call("report_updates", json!({"report_id":"12345"}))
+        .unwrap_err();
+    assert!(
+        error.contains("H1_USERNAME") && error.contains("H1_API_KEY"),
+        "{error}"
+    );
+    s.finish();
+}
 
 #[test]
 fn draft_lifecycle_over_stdio_without_credentials() {

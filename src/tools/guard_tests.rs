@@ -1,4 +1,4 @@
-//! Guards the exposed tool surface: no tool may submit anything to HackerOne.
+//! Pins the tool surface and the explicitly enabled submission boundary.
 
 use std::collections::BTreeSet;
 
@@ -6,9 +6,15 @@ use tempfile::TempDir;
 
 use super::*;
 
-const EXPECTED: [&str; 15] = [
+const EXPECTED: [&str; 21] = [
     "report_list",
     "report_get",
+    "report_updates",
+    "report_reply_draft",
+    "report_reply_draft_get",
+    "report_submit_prepare",
+    "report_submit",
+    "report_submission_get",
     "program_discover",
     "program_list",
     "program_get",
@@ -38,7 +44,7 @@ fn names() -> (TempDir, Vec<String>) {
 }
 
 #[test]
-fn tool_set_is_exactly_the_expected_fifteen() {
+fn tool_set_is_exactly_the_expected_twenty_one() {
     let (_t, n) = names();
     let got: BTreeSet<&str> = n.iter().map(String::as_str).collect();
     let want: BTreeSet<&str> = EXPECTED.into_iter().collect();
@@ -47,20 +53,48 @@ fn tool_set_is_exactly_the_expected_fifteen() {
 }
 
 #[test]
-fn no_tool_name_suggests_submission() {
-    let (_t, n) = names();
-    let banned = [
-        "submit",
-        "send",
-        "post",
-        "publish",
-        "upload",
-        "report_remote",
-    ];
-    for name in &n {
-        let lower = name.to_lowercase();
-        for b in banned {
-            assert!(!lower.contains(b), "tool '{name}' matches banned '{b}'");
+fn submission_defaults_disabled_and_has_side_effect_annotations() {
+    let t = TempDir::new().unwrap();
+    let store = Arc::new(DraftStore::open(t.path().join("d")).unwrap());
+    let server = HackerOneServer::new(None, store);
+    assert!(!server.allow_submit);
+    let tool = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .find(|t| t.name == "report_submit")
+        .unwrap();
+    let annotations = tool.annotations.unwrap();
+    assert_eq!(annotations.read_only_hint, Some(false));
+    assert_eq!(annotations.destructive_hint, Some(true));
+    assert_eq!(annotations.idempotent_hint, Some(false));
+    assert_eq!(annotations.open_world_hint, Some(true));
+}
+
+#[test]
+fn http_building_stays_in_the_client_module() {
+    fn visit(dir: &std::path::Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if path.file_name().unwrap() != "client" {
+                    visit(&path);
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let source = std::fs::read_to_string(&path).unwrap();
+                for needle in [["req", "west::"].concat(), [".po", "st("].concat()] {
+                    assert!(
+                        !source.contains(&needle),
+                        "HTTP outside client: {}",
+                        path.display()
+                    );
+                }
+            }
         }
     }
+    visit(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .as_path(),
+    );
 }

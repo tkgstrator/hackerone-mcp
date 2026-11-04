@@ -29,7 +29,7 @@ async fn run() -> Result<()> {
         }
     };
     let drafts = Arc::new(DraftStore::open(config.drafts_dir)?);
-    let service = HackerOneServer::new(client, drafts)
+    let service = HackerOneServer::new_with_submit(client, drafts, config.allow_submit)
         .serve(stdio())
         .await
         .map_err(|e| Error::Config(format!("failed to start MCP server: {e}")))?;

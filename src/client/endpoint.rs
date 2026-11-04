@@ -1,4 +1,4 @@
-//! Typed, GET-only HackerOne hacker-API endpoints. URLs are built only from
+//! Typed HackerOne hacker-API endpoints. URLs are built only from
 //! validated local parameters; nothing here accepts a path, URL or method.
 
 use reqwest::Url;
@@ -101,6 +101,7 @@ pub fn validate_report_id(id: &str) -> Result<()> {
 
 #[derive(Debug, Clone)]
 pub(super) enum Endpoint<'a> {
+    CreateReport,
     Reports {
         page: PageParams,
     },
@@ -135,6 +136,7 @@ impl Endpoint<'_> {
         let mut url = origin.clone();
         // (base path segments, validated trailing segments, pagination)
         let (base, tail, page): (&[&str], Vec<&str>, PageParams) = match self {
+            Self::CreateReport => (&["v1", "hackers", "reports"], vec![], PageParams::default()),
             Self::Reports { page } => (&["v1", "hackers", "me", "reports"], vec![], *page),
             Self::Report { id } => {
                 validate_report_id(id)?;

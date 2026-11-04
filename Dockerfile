@@ -21,7 +21,7 @@ COPY --from=builder /hackerone-mcp /hackerone-mcp
 # system trust store, so certificates are required) with no shell or package manager.
 FROM gcr.io/distroless/cc-debian12@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa AS runtime
 LABEL org.opencontainers.image.source="https://github.com/tkgstrator/hackerone-mcp" \
-      org.opencontainers.image.description="Read-only HackerOne MCP server that prepares report drafts locally (stdio)" \
+      org.opencontainers.image.description="HackerOne MCP server with local drafts and opt-in report submission (stdio)" \
       org.opencontainers.image.licenses="MIT"
 COPY --from=builder --chown=10001:10001 --chmod=0755 /rootfs/usr/local/bin/hackerone-mcp /usr/local/bin/hackerone-mcp
 COPY --from=builder --chown=10001:10001 --chmod=0700 /rootfs/data/drafts /data/drafts
