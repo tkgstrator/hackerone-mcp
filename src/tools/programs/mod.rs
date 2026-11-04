@@ -4,30 +4,16 @@ mod discovery;
 mod options;
 mod params;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
-use serde_json::Value;
 
 use super::HackerOneServer;
-use crate::client::{H1Client, ScopeFilters};
-use crate::error::Error;
-use options::{envelope, submission_options};
-use params::{DiscoverParams, HandlePageParams, HandleParams, ListParams, ScopeParams, page};
-
-fn render(v: &Value) -> Result<String, ErrorData> {
-    serde_json::to_string(v).map_err(|e| ErrorData::internal_error(e.to_string(), None))
-}
-
-impl HackerOneServer {
-    fn h1(&self) -> Result<&H1Client, ErrorData> {
-        self.client.as_deref().ok_or_else(|| {
-            Error::Config("H1_USERNAME and H1_API_KEY must be set to use program_* tools".into())
-                .into()
-        })
-    }
-}
+use super::api::{envelope, page, render};
+use crate::client::ScopeFilters;
+use options::submission_options;
+use params::{DiscoverParams, HandlePageParams, HandleParams, ListParams, ScopeParams};
 
 #[tool_router(router = program_router, vis = "pub(super)")]
 impl HackerOneServer {

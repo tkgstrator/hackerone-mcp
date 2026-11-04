@@ -410,3 +410,129 @@ async fn oversized_scope_page_is_not_accepted_as_complete_data() {
     assert!(err.to_string().contains("exceeded requested page size"));
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
+
+fn report_fixture() -> serde_json::Value {
+    json!({"data": {"id": "42", "type": "report", "attributes": {
+        "title": "Synthetic report", "state": "triaged",
+        "created_at": "2026-01-02T03:04:05.000Z",
+        "submitted_at": "2026-01-02T03:04:06.000Z",
+        "triaged_at": null,
+        "disclosed_at": null},
+        "relationships": {
+            "activities": {"data": [{"id": "7", "type": "activity-comment",
+                "attributes": {"message": "synthetic reply", "internal": false}}]},
+            "bounties": {"data": [{"id": "8", "type": "bounty",
+                "attributes": {"amount": "100.00", "bonus_amount": "0.00"}}]}}}})
+}
+
+#[tokio::test]
+async fn report_endpoints_use_exact_get_paths_and_keep_raw_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/hackers/reports/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(report_fixture()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/hackers/me/reports"))
+        .and(query_param("page[number]", "2"))
+        .and(query_param("page[size]", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [], "links": {}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = client(&server);
+    let v = c.report("42").await.unwrap();
+    assert_eq!(v, report_fixture());
+    assert!(v["data"]["attributes"]["triaged_at"].is_null());
+    c.reports(PageParams {
+        number: Some(2),
+        size: Some(5),
+    })
+    .await
+    .unwrap();
+    assert_all_get_v1(&server).await;
+}
+
+#[tokio::test]
+async fn invalid_report_ids_and_pages_rejected_without_request() {
+    let server = MockServer::start().await;
+    let c = client(&server);
+    let too_long = "1".repeat(21);
+    for id in [
+        "",
+        "0",
+        "01",
+        "-1",
+        "+1",
+        "1.5",
+        "1/2",
+        "../1",
+        "%31",
+        "1 ",
+        " 1",
+        "１２",
+        "abc",
+        "1?x=1",
+        "1#f",
+        too_long.as_str(),
+    ] {
+        assert!(
+            matches!(c.report(id).await, Err(Error::Validation(_))),
+            "id {id:?}"
+        );
+    }
+    for page in [
+        PageParams {
+            number: Some(0),
+            size: None,
+        },
+        PageParams {
+            number: None,
+            size: Some(101),
+        },
+    ] {
+        assert!(matches!(c.reports(page).await, Err(Error::Validation(_))));
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    // Boundary: 20 digits is accepted by validation.
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+        .mount(&server)
+        .await;
+    c.report(&"9".repeat(20)).await.unwrap();
+}
+
+#[tokio::test]
+async fn report_http_errors_propagate_without_retry() {
+    for status in [401u16, 403, 404] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("nope"))
+            .mount(&server)
+            .await;
+        let c = client(&server);
+        for err in [
+            c.report("42").await.unwrap_err(),
+            c.reports(PageParams::default()).await.unwrap_err(),
+        ] {
+            assert!(err.to_string().contains(&status.to_string()), "{err}");
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn report_response_size_cap_enforced() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/hackers/reports/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(2048)))
+        .mount(&server)
+        .await;
+    let mut c = client(&server);
+    c.limits.response_bytes = 1024;
+    let err = c.report("42").await.unwrap_err();
+    assert!(err.to_string().contains("exceeded"), "{err}");
+}

@@ -99,6 +99,16 @@ impl H1Client {
             .map(|r| r.0)
     }
 
+    pub async fn reports(&self, page: PageParams) -> Result<Value> {
+        self.get_json(&Endpoint::Reports { page })
+            .await
+            .map(|r| r.0)
+    }
+
+    pub async fn report(&self, id: &str) -> Result<Value> {
+        self.get_json(&Endpoint::Report { id }).await.map(|r| r.0)
+    }
+
     pub async fn program(&self, handle: &str) -> Result<Value> {
         self.get_json(&Endpoint::Program { handle })
             .await

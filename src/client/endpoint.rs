@@ -6,6 +6,7 @@ use reqwest::Url;
 use crate::error::{Error, Result};
 
 const MAX_HANDLE_LEN: usize = 64;
+const MAX_REPORT_ID_LEN: usize = 20;
 pub const MAX_PAGE_SIZE: u32 = 100;
 pub const MAX_PAGE_NUMBER: u32 = 1000;
 
@@ -84,8 +85,28 @@ pub fn validate_handle(handle: &str) -> Result<()> {
     }
 }
 
+/// Report IDs are canonical positive decimal integers: `[1-9][0-9]{0,19}`.
+pub fn validate_report_id(id: &str) -> Result<()> {
+    let ok = (1..=MAX_REPORT_ID_LEN).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_digit())
+        && !id.starts_with('0');
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Validation(
+            "report_id must match [1-9][0-9]{0,19}".into(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum Endpoint<'a> {
+    Reports {
+        page: PageParams,
+    },
+    Report {
+        id: &'a str,
+    },
     Programs {
         page: PageParams,
     },
@@ -106,41 +127,56 @@ pub(super) enum Endpoint<'a> {
     },
 }
 
+const PROGRAMS: &[&str] = &["v1", "hackers", "programs"];
+
 impl Endpoint<'_> {
     /// Build the request URL below `origin` (scheme+host only is expected).
     pub(super) fn url(&self, origin: &Url) -> Result<Url> {
         let mut url = origin.clone();
-        let (handle, tail, page): (Option<&str>, &str, PageParams) = match self {
-            Self::Programs { page } => (None, "", *page),
-            Self::Program { handle } => (Some(handle), "", PageParams::default()),
+        // (base path segments, validated trailing segments, pagination)
+        let (base, tail, page): (&[&str], Vec<&str>, PageParams) = match self {
+            Self::Reports { page } => (&["v1", "hackers", "me", "reports"], vec![], *page),
+            Self::Report { id } => {
+                validate_report_id(id)?;
+                (
+                    &["v1", "hackers", "reports"],
+                    vec![*id],
+                    PageParams::default(),
+                )
+            }
+            Self::Programs { page } => (PROGRAMS, vec![], *page),
+            Self::Program { handle } => {
+                validate_handle(handle)?;
+                (PROGRAMS, vec![*handle], PageParams::default())
+            }
             Self::StructuredScopes {
                 handle,
                 page,
                 filters,
             } => {
                 filters.validate()?;
-                (Some(handle), "structured_scopes", *page)
+                validate_handle(handle)?;
+                (PROGRAMS, vec![*handle, "structured_scopes"], *page)
             }
-            Self::Weaknesses { handle, page } => (Some(handle), "weaknesses", *page),
+            Self::Weaknesses { handle, page } => {
+                validate_handle(handle)?;
+                (PROGRAMS, vec![*handle, "weaknesses"], *page)
+            }
             Self::ScopeExclusions { handle } => {
-                (Some(handle), "scope_exclusions", PageParams::default())
+                validate_handle(handle)?;
+                (
+                    PROGRAMS,
+                    vec![*handle, "scope_exclusions"],
+                    PageParams::default(),
+                )
             }
         };
-        if let Some(h) = handle {
-            validate_handle(h)?;
-        }
         page.validate()?;
         {
             let mut seg = url
                 .path_segments_mut()
                 .map_err(|()| Error::Config("invalid base URL".into()))?;
-            seg.pop_if_empty().extend(["v1", "hackers", "programs"]);
-            if let Some(h) = handle {
-                seg.push(h);
-            }
-            if !tail.is_empty() {
-                seg.push(tail);
-            }
+            seg.pop_if_empty().extend(base).extend(tail);
         }
         {
             let mut q = url.query_pairs_mut();

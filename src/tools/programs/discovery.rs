@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 use tokio::time::{Instant, timeout_at};
 
 use super::params::DiscoverParams;
-use super::render;
 use crate::client::{H1Client, PageParams, validate_handle};
 use crate::error::Error;
+use crate::tools::api::render;
 
 #[cfg(test)]
 #[path = "discovery_tests.rs"]

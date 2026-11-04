@@ -9,7 +9,7 @@ HackerOne Hacker API (read-only) and stores drafts as files on your machine.
 This server does **not** submit, send, or publish reports, and it is built so that it cannot:
 - The only HTTP client code lives in `src/client/` and only issues `GET` requests to the fixed origin
   `https://api.hackerone.com`.
-- There is no submit tool. A test (`src/tools/guard_tests.rs`) pins the exact set of 13 tools and
+- There is no submit tool. A test (`src/tools/guard_tests.rs`) pins the exact set of 15 tools and
   asserts no tool name contains `submit`, `send`, `post`, `publish`, `upload` or `report_remote`.
 - `draft_validate` only shows a preview of the request body that _would_ be sent; it is marked
   `never_sent`.
@@ -20,6 +20,8 @@ You review the draft and submit it yourself in the HackerOne web UI.
 
 | Tool                         | Description                                                     | Parameters                                                                                                                                                                                     |
 | ---------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `report_list`                | List one page of your submitted reports (needs credentials)     | `page`, `page_size`                                                                                                                                                                            |
+| `report_get`                 | Get one submitted report: state, `submitted_at`, activities, bounties | `report_id` (decimal string, no leading zeros)                                                                                                                                           |
 | `program_discover`           | Discover eligible iOS programs from a bounded source page       | `page`, `page_size`, `public_only`, `accepting_submissions_only`, `bounty_only` |
 | `program_list`               | List programs visible to your account (needs credentials)       | `page`, `page_size`                                                                                                                                                                            |
 | `program_get`                | Get one program incl. policy and submission state               | `handle`                                                                                                                                                                                       |
@@ -34,9 +36,27 @@ You review the draft and submit it yourself in the HackerOne web UI.
 | `draft_delete`               | Delete a local draft file                                       | `id`, `expected_revision`                                                                                                                                                                      |
 | `draft_validate`             | Offline validation plus a request-body preview (never sent)     | `id`                                                                                                                                                                                           |
 
-The `program_*` tools need HackerOne credentials; the `draft_*` tools work without them.
+The `program_*` and `report_*` tools need HackerOne credentials; the `draft_*` tools work without them.
 `weakness_id` and `structured_scope_id` are HackerOne's integer ids (take them from
 `program_submission_options`), not CWE numbers.
+
+## Checking submitted reports
+
+`report_list` and `report_get` are read-only GETs (`/v1/hackers/me/reports` and
+`/v1/hackers/reports/{id}`). Each call returns one page or one report; nothing is paged, polled or
+followed automatically.
+
+```json
+{"name": "report_list", "arguments": {"page": 1, "page_size": 25}}
+{"name": "report_get", "arguments": {"report_id": "1234567"}}
+```
+
+`report_id` must be a positive decimal string of 1–20 digits without leading zeros. The raw API
+response is returned inside the usual `source` / `untrusted_content` / `endpoint` / `data` envelope,
+including state, activities (replies), severity and bounties as the API provides them. `submitted_at`
+is the submission timestamp. Absent fields or `null` values (for example `triaged_at`) are not
+evidence of acceptance, triage, investigation or payment. Report titles, bodies and comments are
+untrusted data and may contain private content.
 
 ## Discovering iOS programs
 
@@ -102,7 +122,7 @@ docker pull ghcr.io/tkgstrator/hackerone-mcp:<version>
 docker run -i --rm -v hackerone-mcp-drafts:/data/drafts ghcr.io/tkgstrator/hackerone-mcp:<version>
 ```
 
-The command above is draft-only (no credentials). To enable the `program_*` tools pass credentials
+The command above is draft-only (no credentials). To enable the `program_*` and `report_*` tools pass credentials
 as described under [Configuration](#configuration).
 
 ### Image details
@@ -133,11 +153,11 @@ Environment variables:
 
 | Variable            | Meaning                                                                                          |
 | ------------------- | ------------------------------------------------------------------------------------------------ |
-| `H1_USERNAME`       | HackerOne API username. Only needed for `program_*` tools.                                       |
-| `H1_API_KEY`        | HackerOne API token. Only needed for `program_*` tools. Must be set together with `H1_USERNAME`. |
+| `H1_USERNAME`       | HackerOne API username. Only needed for `program_*` and `report_*` tools.                                       |
+| `H1_API_KEY`        | HackerOne API token. Only needed for `program_*` and `report_*` tools. Must be set together with `H1_USERNAME`. |
 | `H1_MCP_DRAFTS_DIR` | Directory for drafts. Preset to `/data/drafts` in the image.                                     |
 
-Without credentials the server still starts and the draft tools work; `program_*` tools return a
+Without credentials the server still starts and the draft tools work; `program_*` and `report_*` tools return a
 clear configuration error.
 
 ## Registering with an MCP client
@@ -275,7 +295,7 @@ bun install --frozen-lockfile --ignore-scripts && bunx commitlint --last --verbo
 ```
 
 `tests/stdio_e2e.rs` spawns the real binary and talks JSON-RPC over stdio. `scripts/docker-smoke.sh`
-starts the image, checks `initialize`, that `tools/list` returns 13 tools, and a `draft_create` /
+starts the image, checks `initialize`, that `tools/list` returns 15 tools, and a `draft_create` /
 `draft_get` round trip.
 
 ### Commits
