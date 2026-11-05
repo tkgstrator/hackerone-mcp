@@ -64,7 +64,8 @@ pub struct Draft {
 }
 
 /// A draft together with its Markdown body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Stored {
     pub draft: Draft,
     pub body: String,

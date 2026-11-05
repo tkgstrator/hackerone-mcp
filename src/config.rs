@@ -21,6 +21,7 @@ impl fmt::Debug for Credentials {
 pub struct Config {
     pub credentials: Option<Credentials>,
     pub drafts_dir: PathBuf,
+    pub allow_submit: bool,
 }
 
 fn non_empty(v: Option<String>) -> Option<String> {
@@ -51,9 +52,19 @@ impl Config {
                 PathBuf::from(home).join(".config/hackerone-mcp/drafts")
             }
         };
+        let allow_submit = match get("H1_MCP_ALLOW_SUBMIT").as_deref() {
+            None | Some("" | "false") => false,
+            Some("true") => true,
+            _ => {
+                return Err(Error::Config(
+                    "H1_MCP_ALLOW_SUBMIT must be exactly true or false".into(),
+                ));
+            }
+        };
         Ok(Self {
             credentials,
             drafts_dir,
+            allow_submit,
         })
     }
 }
@@ -69,6 +80,25 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         Config::from_lookup(|k| m.get(k).cloned())
+    }
+
+    #[test]
+    fn submission_requires_exact_explicit_opt_in() {
+        for value in ["", "false"] {
+            assert!(
+                !cfg(&[("HOME", "/h"), ("H1_MCP_ALLOW_SUBMIT", value)])
+                    .unwrap()
+                    .allow_submit
+            );
+        }
+        assert!(
+            cfg(&[("HOME", "/h"), ("H1_MCP_ALLOW_SUBMIT", "true")])
+                .unwrap()
+                .allow_submit
+        );
+        for value in ["1", "TRUE", "yes", " true"] {
+            assert!(cfg(&[("HOME", "/h"), ("H1_MCP_ALLOW_SUBMIT", value)]).is_err());
+        }
     }
 
     #[test]

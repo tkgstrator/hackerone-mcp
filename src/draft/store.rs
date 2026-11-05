@@ -144,7 +144,9 @@ impl Inner {
         for e in rd.flatten() {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
-            if !(name.starts_with(".tmp-") && name.ends_with(".md.part")) {
+            if !(name.starts_with(".tmp-")
+                && (name.ends_with(".md.part") || name.ends_with(".workflow.part")))
+            {
                 continue;
             }
             let Ok(m) = fs::symlink_metadata(e.path()) else {
@@ -392,3 +394,5 @@ impl DraftStore {
 
 #[cfg(test)]
 mod tests;
+
+mod workflow;

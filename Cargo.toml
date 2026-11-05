@@ -1,10 +1,10 @@
 [package]
 name = "hackerone-mcp"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
-description = "Read-only HackerOne MCP server that prepares report drafts locally"
+description = "HackerOne MCP server with local drafts and opt-in report submission"
 
 [[bin]]
 name = "hackerone-mcp"

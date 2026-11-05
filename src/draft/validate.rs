@@ -6,8 +6,7 @@ use serde_json::{Value, json};
 use super::model::{Draft, MAX_BODY_BYTES, check_body};
 
 pub const DISCLAIMER: &str = "Offline check only. It does not prove you may submit to this program \
-(scope, eligibility, and program rules are not verified). Nothing is sent to HackerOne; \
-submit manually in the HackerOne web UI.";
+(scope, eligibility, and program rules are not verified). This offline validation sends nothing to HackerOne.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidationReport {
@@ -81,7 +80,7 @@ pub fn validate(draft: &Draft, body: &str) -> ValidationReport {
         warnings,
         request_body_preview: json!({
             "never_sent": true,
-            "note": "This is the body that WOULD be sent to POST /hackers/reports. This server never sends it.",
+            "note": "This preview operation sends nothing. A separately approved report_submit can send this inner body to POST /hackers/reports.",
             "body": {"data": {"type": "report", "attributes": attrs}},
         }),
         disclaimer: DISCLAIMER,

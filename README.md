@@ -2,19 +2,18 @@
 
 A stdio [MCP](https://modelcontextprotocol.io) server that helps a bug-bounty hacker prepare
 [HackerOne](https://hackerone.com) report **drafts locally**. It reads program information from the
-HackerOne Hacker API (read-only) and stores drafts as files on your machine.
+HackerOne Hacker API, tracks submitted reports and stores drafts as files on your machine.
 
-## Non-goal: it never submits anything
+## Submission is explicitly enabled
 
-This server does **not** submit, send, or publish reports, and it is built so that it cannot:
-- The only HTTP client code lives in `src/client/` and only issues `GET` requests to the fixed origin
-  `https://api.hackerone.com`.
-- There is no submit tool. A test (`src/tools/guard_tests.rs`) pins the exact set of 15 tools and
-  asserts no tool name contains `submit`, `send`, `post`, `publish`, `upload` or `report_remote`.
-- `draft_validate` only shows a preview of the request body that _would_ be sent; it is marked
-  `never_sent`.
+Remote submission is disabled by default. Enable `H1_MCP_ALLOW_SUBMIT=true` to use
+`report_submit` after reviewing a prepared preview and explicitly approving its recipient and body.
+Preparation, validation and all other draft operations send nothing to HackerOne. Comments remain
+local reply drafts for manual sending in the HackerOne web UI.
 
-You review the draft and submit it yourself in the HackerOne web UI.
+HTTP code stays in `src/client/`, with a fixed `https://api.hackerone.com` origin and redirects
+disabled. Reads retain bounded retries; report submission uses a separate client with retries
+disabled and a persistent single-attempt ledger. Guard tests pin all 21 tools and submission annotations.
 
 ## Tools
 
@@ -22,6 +21,12 @@ You review the draft and submit it yourself in the HackerOne web UI.
 | ---------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `report_list`                | List one page of your submitted reports (needs credentials)     | `page`, `page_size`                                                                                                                                                                            |
 | `report_get`                 | Get one submitted report: state, `submitted_at`, activities, bounties | `report_id` (decimal string, no leading zeros)                                                                                                                                           |
+| `report_updates`             | Compare returned status and activities with a local baseline | `report_id`, `mark_seen` (default true) |
+| `report_reply_draft`         | Save a local reply and manual-send report URL | `report_id`, `message` |
+| `report_reply_draft_get`     | Read the saved local reply | `report_id` |
+| `report_submit_prepare`      | Validate and persist an exact submission preview; no POST | `draft_id`, `expected_revision` |
+| `report_submit`              | Submit the explicitly approved preview once; requires opt-in | `draft_id`, `expected_revision`, `confirmation_token`, `confirm` |
+| `report_submission_get`      | Read the local submission receipt or uncertain status | `draft_id` |
 | `program_discover`           | Discover eligible iOS programs from a bounded source page       | `page`, `page_size`, `public_only`, `accepting_submissions_only`, `bounty_only` |
 | `program_list`               | List programs visible to your account (needs credentials)       | `page`, `page_size`                                                                                                                                                                            |
 | `program_get`                | Get one program incl. policy and submission state               | `handle`                                                                                                                                                                                       |
@@ -36,7 +41,8 @@ You review the draft and submit it yourself in the HackerOne web UI.
 | `draft_delete`               | Delete a local draft file                                       | `id`, `expected_revision`                                                                                                                                                                      |
 | `draft_validate`             | Offline validation plus a request-body preview (never sent)     | `id`                                                                                                                                                                                           |
 
-The `program_*` and `report_*` tools need HackerOne credentials; the `draft_*` tools work without them.
+API reads, submission preparation and submission need HackerOne credentials. Local draft tools,
+reply draft save/get and submission receipt lookup work without credentials.
 `weakness_id` and `structured_scope_id` are HackerOne's integer ids (take them from
 `program_submission_options`), not CWE numbers.
 
@@ -57,6 +63,59 @@ including state, activities (replies), severity and bounties as the API provides
 is the submission timestamp. Absent fields or `null` values (for example `triaged_at`) are not
 evidence of acceptance, triage, investigation or payment. Report titles, bodies and comments are
 untrusted data and may contain private content.
+
+## Report updates and replies
+
+`report_updates` fetches one report and compares status/time fields, bounties and returned activities
+with a private local snapshot. The first observation is labelled a baseline, not new arrivals.
+New activities and edits are separate; missing fields or an unavailable activity relationship do not
+erase prior observations. An empty activity page does not prove the entire report has no comments.
+Coverage is limited to what the API returns. `mark_seen=false` previews the difference without
+advancing the snapshot. Concurrent changes fail clearly instead of overwriting a newer baseline.
+One baseline is retained per report in a volume; switching API accounts starts a fresh baseline.
+
+```json
+{"name":"report_updates","arguments":{"report_id":"1234567","mark_seen":false}}
+{"name":"report_reply_draft","arguments":{"report_id":"1234567","message":"Thank you. I can provide more details."}}
+{"name":"report_reply_draft_get","arguments":{"report_id":"1234567"}}
+```
+
+Reply text is stored locally (nonblank, no NUL, up to 200,000 UTF-8 bytes). The returned fixed report
+URL is for manually sending it in the web UI. The public [Hacker API](https://api.hackerone.com/hacker-resources/)
+does not document comment creation; this server does not use the separate Customer API or browser cookies.
+Snapshots retain at most 1000 observed activity IDs and 8 MiB of private JSON. Exceeding a bound fails
+without advancing; use `report_get` to inspect the current API response directly.
+
+## Preparing and submitting a report
+
+1. Create and validate a complete local draft, including `team_handle`, title, body and `impact`.
+2. Call `report_submit_prepare` with its `draft_id` and exact `expected_revision`. This saves a preview,
+   not a remote report. Review the returned account, program, complete `request_body` and warnings.
+3. Only after explicit user approval, call `report_submit` with the same draft ID/revision,
+   `confirmation_token` and `confirm=true`. A token is a consistency check, not proof of human approval.
+4. Read `report_submission_get` for the saved result. A successful receipt contains the report ID and URL.
+
+Enable submission explicitly in the server process. For Docker, add `-e H1_MCP_ALLOW_SUBMIT=true`
+before the image argument, alongside the existing `--env-file` and persistent volume. Unset, empty
+or `false` keeps submission disabled; other strings, including `1` and `TRUE`, fail configuration.
+
+Preparation binds the account, full draft content, revision and exact serialized request bytes. A
+new preparation invalidates the previous token; a draft edit before claim rejects the old preview.
+Only the documented API fields are posted: local notes, CWE/CVSS labels, affected versions and
+references are not silently appended. Offline validation does not establish program eligibility.
+
+Before POST, the server durably consumes the attempt under the draft lock. It makes one POST to
+`/v1/hackers/reports`, with no retry on any HTTP status or connection failure. A cancelled waiting
+tool call still allows the receipt task to finish while the server is alive. A crash, timeout,
+malformed response or receipt failure may leave `attempting`/`unknown`; **inspect HackerOne before
+any new submission**. HTTP failures also consume the attempt. Only after confirming non-creation
+should a user deliberately fix/copy the draft to a new ID. No retry/reset tool is provided.
+
+The guard is local and per draft ID, not server-side or cross-ID idempotency. Copying a draft to a
+different ID or deleting the ledger/volume bypasses it and can duplicate reports. Editing/deleting
+the original draft does not remove the ledger. Keep the same volume across upgrades. Workflow
+records use reserved dot-prefixed 0600 files inside the private drafts directory; corrupt or
+insecure records fail closed rather than resetting history.
 
 ## Discovering iOS programs
 
@@ -122,7 +181,7 @@ docker pull ghcr.io/tkgstrator/hackerone-mcp:<version>
 docker run -i --rm -v hackerone-mcp-drafts:/data/drafts ghcr.io/tkgstrator/hackerone-mcp:<version>
 ```
 
-The command above is draft-only (no credentials). To enable the `program_*` and `report_*` tools pass credentials
+The command above is local-only (no credentials). To enable API-backed tools pass credentials
 as described under [Configuration](#configuration).
 
 ### Image details
@@ -153,11 +212,12 @@ Environment variables:
 
 | Variable            | Meaning                                                                                          |
 | ------------------- | ------------------------------------------------------------------------------------------------ |
-| `H1_USERNAME`       | HackerOne API username. Only needed for `program_*` and `report_*` tools.                                       |
-| `H1_API_KEY`        | HackerOne API token. Only needed for `program_*` and `report_*` tools. Must be set together with `H1_USERNAME`. |
+| `H1_USERNAME`       | HackerOne API username. Needed for API reads and submission preparation/execution.                                       |
+| `H1_API_KEY`        | HackerOne API token. Needed for API reads and submission preparation/execution. Must be set together with `H1_USERNAME`. |
 | `H1_MCP_DRAFTS_DIR` | Directory for drafts. Preset to `/data/drafts` in the image.                                     |
+| `H1_MCP_ALLOW_SUBMIT` | Exact `true` enables separately approved report submission. Defaults to disabled. |
 
-Without credentials the server still starts and the draft tools work; `program_*` and `report_*` tools return a
+Without credentials the server still starts and local draft/reply/receipt tools work; API-backed tools return a
 clear configuration error.
 
 ## Registering with an MCP client
@@ -257,7 +317,7 @@ Draft tool outputs return the full body, up to the 200,000-byte body limit. Only
 2. `draft_create`, then refine with `draft_update`.
 3. `draft_validate` for an offline check of the required fields and a preview of the request body.
    It does not prove you are allowed to submit to the program.
-4. Copy the draft into the HackerOne web UI and submit it there, manually.
+4. Submit manually in the HackerOne web UI, or use the reviewed prepare/submit sequence above when enabled.
 
 For CVE preparation the drafts carry `cwe`, `cvss_vector` and `affected_versions`. These are local
 notes only. CVE IDs are assigned by a CNA (the vendor, a CNA-of-last-resort, or MITRE), never by this tool.
@@ -295,7 +355,7 @@ bun install --frozen-lockfile --ignore-scripts && bunx commitlint --last --verbo
 ```
 
 `tests/stdio_e2e.rs` spawns the real binary and talks JSON-RPC over stdio. `scripts/docker-smoke.sh`
-starts the image, checks `initialize`, that `tools/list` returns 15 tools, and a `draft_create` /
+starts the image, checks `initialize`, that `tools/list` returns 21 tools, and a `draft_create` /
 `draft_get` round trip.
 
 ### Commits
