@@ -18,6 +18,7 @@ pub struct SearchParams {
     pub disclosed_before: Option<String>,
     pub sort: Option<HacktivitySort>,
     pub page: Option<u32>,
+    /// 1..=50, default 25. Larger requests silently lose rows in the live API.
     pub page_size: Option<u32>,
 }
 
@@ -38,7 +39,7 @@ impl SearchParams {
 pub struct ActivityParams {
     /// Exact username. Empty activity does not prove a nonexistent account.
     pub username: String,
-    /// Maximum source pages, 1..=10; default 3 (100 reports/page).
+    /// Maximum source pages, 1..=10; default 3 (50 reports/page).
     pub max_pages: Option<u32>,
 }
 

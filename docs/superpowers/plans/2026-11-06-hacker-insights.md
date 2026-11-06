@@ -10,7 +10,7 @@
 ## Global constraints
 
 - Rust floor 1.89; release 0.5.0; 24 tools total; official fixed-origin GET only.
-- Per cohort max 10 pages / 1000 items; trends max 20 pages / 2000 items. A SHARED 5 MiB input budget and 45-second deadline cover the whole tool; output 1 MiB.
+- Per cohort max 10 pages / 500 items; trends max 20 pages / 1000 items. A SHARED 5 MiB input budget and 45-second deadline cover the whole tool; output 1 MiB.
 - Partial/filtered/invalid data must disclose coverage; incomplete trend comparisons are null.
 - Rewards are exact decimal report amounts, currency-aware or separated per unknown-currency program; never personal earnings.
 - No commits by delegates. Codex owns guarded commits, integration, immutable-source verification and release.

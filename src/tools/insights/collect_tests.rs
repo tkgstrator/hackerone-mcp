@@ -33,6 +33,31 @@ fn row(id: u32, disclosed: &str) -> Value {
     json!({"id":id,"type":"report","attributes":{"title":"Public fixture","disclosed":true,"disclosed_at":disclosed,"submitted_at":"2026-01-01T00:00:00Z","cwe":"XSS","severity_rating":"high","total_awarded_amount":null,"vulnerability_information":"NEVER_INCLUDE_THIS_PRIVATE_BODY"},"relationships":{"reporter":{"data":{"type":"user","attributes":{"username":"alice"}}},"program":{"data":{"type":"program","attributes":{"handle":"acme"}}}}})
 }
 
+#[tokio::test]
+async fn aggregates_page_at_the_live_cap_and_retain_the_tail_without_next_links() {
+    let server = MockServer::start().await;
+    let first: Vec<_> = (1..=50).map(|n| row(n, "2026-11-05T00:00:00Z")).collect();
+    let tail: Vec<_> = (51..=60).map(|n| row(n, "2026-11-05T00:00:00Z")).collect();
+    page(&server, 1, json!({"data":first,"links":{}})).await;
+    page(&server, 2, json!({"data":tail,"links":{}})).await;
+    let got = parse(
+        activity_with_limits(&client(&server), activity(), limits())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(got["data"]["coverage"]["unique_reports"], 60);
+    assert_eq!(got["data"]["coverage"]["pages_received"], 2);
+    assert_eq!(got["data"]["coverage"]["source_exhausted"], true);
+    for request in server.received_requests().await.unwrap() {
+        assert!(
+            request
+                .url
+                .query_pairs()
+                .any(|(k, v)| k == "page[size]" && v == "50")
+        );
+    }
+}
+
 fn activity() -> ActivityParams {
     ActivityParams {
         username: "alice".into(),
@@ -107,7 +132,7 @@ async fn short_page_with_next_keeps_generated_paging_but_never_follows_link() {
 #[tokio::test]
 async fn full_page_at_budget_is_truncated_even_without_a_next_link() {
     let server = MockServer::start().await;
-    let rows: Vec<_> = (1..=100).map(|n| row(n, "2026-11-05T00:00:00Z")).collect();
+    let rows: Vec<_> = (1..=50).map(|n| row(n, "2026-11-05T00:00:00Z")).collect();
     page(&server, 1, json!({"data":rows})).await;
     let mut p = activity();
     p.max_pages = Some(1);
@@ -123,20 +148,15 @@ async fn full_page_at_budget_is_truncated_even_without_a_next_link() {
 #[tokio::test]
 async fn duplicates_across_pages_suppress_completeness_even_after_exhaustion() {
     let server = MockServer::start().await;
-    let rows: Vec<_> = (1..=100).map(|n| row(n, "2026-11-05T00:00:00Z")).collect();
+    let rows: Vec<_> = (1..=50).map(|n| row(n, "2026-11-05T00:00:00Z")).collect();
     page(&server, 1, json!({"data":rows})).await;
-    page(
-        &server,
-        2,
-        json!({"data":[row(100,"2026-11-05T00:00:00Z")]}),
-    )
-    .await;
+    page(&server, 2, json!({"data":[row(50,"2026-11-05T00:00:00Z")]})).await;
     let got = parse(
         activity_with_limits(&client(&server), activity(), limits())
             .await
             .unwrap(),
     );
-    assert_eq!(got["data"]["coverage"]["unique_reports"], 100);
+    assert_eq!(got["data"]["coverage"]["unique_reports"], 50);
     assert_eq!(got["data"]["coverage"]["duplicate_items"], 1);
     assert_eq!(got["data"]["coverage"]["source_exhausted"], true);
     assert_eq!(got["data"]["coverage"]["cohort_complete"], false);
@@ -287,6 +307,14 @@ async fn trends_use_disclosure_dates_not_submission_dates_and_match_windows_loca
     assert_eq!(got["data"]["current_coverage"]["unique_reports"], 2);
     assert_eq!(got["data"]["current_coverage"]["excluded_items"], 1);
     assert_eq!(got["data"]["date_basis"], "disclosed_at");
+    for request in server.received_requests().await.unwrap() {
+        assert!(
+            request
+                .url
+                .query_pairs()
+                .any(|(k, v)| k == "page[size]" && v == "50")
+        );
+    }
     assert!(got["data"]["comparison"]["count_change"].is_null());
 }
 
@@ -320,6 +348,8 @@ async fn search_page_and_size_invalid_before_network() {
         json!({"page":0}),
         json!({"page":1001}),
         json!({"page_size":0}),
+        json!({"page_size":51}),
+        json!({"page_size":100}),
         json!({"page_size":101}),
     ] {
         assert!(

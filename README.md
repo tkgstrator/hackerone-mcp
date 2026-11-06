@@ -82,7 +82,9 @@ exact decimal arithmetic and return decimal strings. Explicit currencies are gro
 missing currency is grouped only within the same known program. Amounts with neither currency nor
 a program identity have counts but no monetary sum/median. There is no assumed USD conversion.
 
-Each cohort reads up to `max_pages` of 100 reports. A shared 45-second deadline and 5 MiB admitted
+The live API silently caps results at 50 while calculating offsets from the requested size.
+Hacktivity requests therefore reject sizes above 50; the default search size remains 25.
+Each cohort reads up to `max_pages` of 50 reports. A shared 45-second deadline and 5 MiB admitted
 response budget cover the whole call, including both trend windows. The existing client may read
 one additional bounded response (up to 4 MiB) before rejecting that page at the admission budget;
 received and admitted bytes are reported separately. Returned pagination URLs are never followed.
@@ -91,7 +93,7 @@ errors preserve prior results. Incomplete cohorts suppress comparative growth fi
 exhausted API result is an observed public cohort, not proof of all platform activity.
 
 Group/reward/recent-report lists have at most 10 entries with omission counts; search pages have
-at most 100. Responses are capped at 1 MiB; optional lists are trimmed if necessary and
+at most 50. Responses are capped at 1 MiB; optional lists are trimmed if necessary and
 `output_truncated` / `output_omitted_entries` expose that extra trimming. API-derived text stays
 inside an untrusted-data envelope.
 

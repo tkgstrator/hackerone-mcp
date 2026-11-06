@@ -11,6 +11,9 @@ use crate::error::{Error, Result};
 const MAX_HANDLE_LEN: usize = 64;
 const MAX_REPORT_ID_LEN: usize = 20;
 pub const MAX_PAGE_SIZE: u32 = 100;
+// Live Hacktivity caps the result limit at 50 but offsets by the requested size.
+// Larger requests silently skip results on the next page.
+pub(crate) const HACKTIVITY_MAX_PAGE_SIZE: u32 = 50;
 pub const MAX_PAGE_NUMBER: u32 = 1000;
 
 /// Optional pagination parameters (`page[number]`, `page[size]`).
@@ -323,6 +326,14 @@ impl Endpoint<'_> {
             }
             Self::Hacktivity { page, filters, .. } => {
                 filters.validate()?;
+                if page
+                    .size
+                    .is_some_and(|size| size > HACKTIVITY_MAX_PAGE_SIZE)
+                {
+                    return Err(Error::Validation(format!(
+                        "Hacktivity page_size must be 1..={HACKTIVITY_MAX_PAGE_SIZE}"
+                    )));
+                }
                 (&["v1", "hackers", "hacktivity"], vec![], *page)
             }
             Self::ScopeExclusions { handle } => {

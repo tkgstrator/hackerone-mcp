@@ -11,6 +11,21 @@ use super::*;
 const SYNTHETIC_USER: &str = "synthetic_user";
 const SYNTHETIC_KEY: &str = "synthetic-key-not-real";
 
+#[tokio::test]
+async fn hacktivity_rejects_the_live_silently_clamped_page_size_before_network() {
+    for size in [51, 100] {
+        assert_rejected_without_network(
+            PageParams {
+                number: Some(2),
+                size: Some(size),
+            },
+            &f(),
+            HacktivitySort::default(),
+        )
+        .await;
+    }
+}
+
 fn creds() -> Credentials {
     Credentials {
         username: SYNTHETIC_USER.into(),
@@ -697,7 +712,7 @@ async fn out_of_range_pages_never_reach_the_network() {
 async fn page_boundaries_are_accepted() {
     let server = MockServer::start().await;
     mount_ok(&server).await;
-    for (number, size) in [(1, 1), (1000, 100)] {
+    for (number, size) in [(1, 1), (1000, 50)] {
         client(&server)
             .hacktivity(
                 PageParams {
