@@ -11,7 +11,9 @@ use tokio::time::{Instant, timeout_at};
 
 use super::model::{self, Record, SelectionError};
 use super::params::{ActivityParams, SearchParams, TrendsParams};
-use crate::client::{H1Client, HacktivityFilters, HacktivitySort, PageParams, parse_date};
+use crate::client::{
+    H1Client, HACKTIVITY_MAX_PAGE_SIZE, HacktivityFilters, HacktivitySort, PageParams, parse_date,
+};
 use crate::error::Error;
 use crate::tools::api::{envelope, render};
 
@@ -273,8 +275,11 @@ pub(super) async fn search_with_limits(
     let filters = p.filters();
     let number = p.page.unwrap_or(1);
     let size = p.page_size.unwrap_or(25);
-    if !(1..=1000).contains(&number) || !(1..=100).contains(&size) {
-        return Err(Error::Validation("page must be 1..=1000 and page_size 1..=100".into()).into());
+    if !(1..=1000).contains(&number) || !(1..=HACKTIVITY_MAX_PAGE_SIZE).contains(&size) {
+        return Err(Error::Validation(format!(
+            "page must be 1..=1000 and page_size 1..={HACKTIVITY_MAX_PAGE_SIZE}"
+        ))
+        .into());
     }
     let sort = p.sort.unwrap_or_default();
     let mut budget = Budget::new(limits);
@@ -319,7 +324,7 @@ pub(super) async fn activity_with_limits(
         disclosure_sort(),
         Collection {
             first_page: 1,
-            size: 100,
+            size: HACKTIVITY_MAX_PAGE_SIZE,
             max_pages: count,
         },
         &mut budget,
@@ -328,7 +333,7 @@ pub(super) async fn activity_with_limits(
     .await?;
     output(
         "hacker_activity",
-        json!({"cohort":"disclosed_only", "all_findings_complete":false, "source_request":{"filters":filters,"sort":"-disclosed_at","max_pages":count,"page_size":100}, "coverage":cohort.coverage, "summary":super::stats::summarize(&cohort.records)}),
+        json!({"cohort":"disclosed_only", "all_findings_complete":false, "source_request":{"filters":filters,"sort":"-disclosed_at","max_pages":count,"page_size":HACKTIVITY_MAX_PAGE_SIZE}, "coverage":cohort.coverage, "summary":super::stats::summarize(&cohort.records)}),
         limits,
     )
 }
@@ -383,7 +388,7 @@ pub(super) async fn trends_with_limits(
         disclosure_sort(),
         Collection {
             first_page: 1,
-            size: 100,
+            size: HACKTIVITY_MAX_PAGE_SIZE,
             max_pages: count,
         },
         &mut budget,
@@ -396,7 +401,7 @@ pub(super) async fn trends_with_limits(
         disclosure_sort(),
         Collection {
             first_page: 1,
-            size: 100,
+            size: HACKTIVITY_MAX_PAGE_SIZE,
             max_pages: count,
         },
         &mut budget,
@@ -413,7 +418,7 @@ pub(super) async fn trends_with_limits(
     }
     output(
         "hacktivity_trends",
-        json!({"cohort":"disclosed_only", "all_findings_complete":false, "date_basis":"disclosed_at", "timezone":"UTC", "days":days, "current_window":{"after_inclusive":middle.to_string(),"before_exclusive":end.to_string()}, "previous_window":{"after_inclusive":start.to_string(),"before_exclusive":middle.to_string()}, "source_request":{"current_filters":current_filters,"previous_filters":previous_filters,"sort":"-disclosed_at","max_pages_per_window":count,"page_size":100}, "current_coverage":current.coverage,"previous_coverage":previous.coverage,"comparison_unavailable_reasons":reasons,"comparison":super::trends::compare(&current.records,&previous.records,comparable)}),
+        json!({"cohort":"disclosed_only", "all_findings_complete":false, "date_basis":"disclosed_at", "timezone":"UTC", "days":days, "current_window":{"after_inclusive":middle.to_string(),"before_exclusive":end.to_string()}, "previous_window":{"after_inclusive":start.to_string(),"before_exclusive":middle.to_string()}, "source_request":{"current_filters":current_filters,"previous_filters":previous_filters,"sort":"-disclosed_at","max_pages_per_window":count,"page_size":HACKTIVITY_MAX_PAGE_SIZE}, "current_coverage":current.coverage,"previous_coverage":previous.coverage,"comparison_unavailable_reasons":reasons,"comparison":super::trends::compare(&current.records,&previous.records,comparable)}),
         limits,
     )
 }

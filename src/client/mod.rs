@@ -18,8 +18,8 @@ use serde_json::Value;
 
 use crate::config::Credentials;
 use crate::error::{Error, Result};
-pub(crate) use endpoint::parse_date;
 use endpoint::{Endpoint, MAX_PAGE_SIZE};
+pub(crate) use endpoint::{HACKTIVITY_MAX_PAGE_SIZE, parse_date};
 pub use endpoint::{HacktivityFilters, HacktivitySort, PageParams, ScopeFilters};
 pub(crate) use endpoint::{validate_handle, validate_report_id};
 use retry::{RetryPolicy, parse_retry_after};
