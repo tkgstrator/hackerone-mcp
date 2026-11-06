@@ -1,6 +1,6 @@
 [package]
 name = "hackerone-mcp"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -15,7 +15,8 @@ rmcp = { version = "=3.8.0", default-features = false, features = ["server", "ma
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "io-std", "sync", "time"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 schemars = "1"
 toml = "1"
 libc = "0.2"

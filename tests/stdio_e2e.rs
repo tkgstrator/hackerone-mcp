@@ -141,7 +141,10 @@ fn private_dir() -> tempfile::TempDir {
     d
 }
 
-const EXPECTED: [&str; 21] = [
+const EXPECTED: [&str; 24] = [
+    "hacktivity_search",
+    "hacker_activity",
+    "hacktivity_trends",
     "report_list",
     "report_get",
     "report_updates",
@@ -331,4 +334,24 @@ fn credentials_never_appear_on_stdout_or_stderr() {
         assert!(!out.contains(secret), "secret leaked on stdout");
         assert!(!err.contains(secret), "secret leaked on stderr");
     }
+}
+
+#[test]
+fn public_insight_tools_require_credentials_over_stdio() {
+    let dir = private_dir();
+    let mut s = Server::spawn(dir.path(), None);
+    s.handshake();
+    for (name, args) in [
+        ("hacktivity_search", json!({})),
+        ("hacker_activity", json!({"username":"example"})),
+        ("hacktivity_trends", json!({"days":30})),
+    ] {
+        let error = s.call(name, args).unwrap_err();
+        assert!(
+            error.contains("H1_USERNAME") && error.contains("H1_API_KEY"),
+            "{name}: {error}"
+        );
+    }
+    assert!(s.call("draft_list", json!({})).is_ok());
+    s.finish();
 }
