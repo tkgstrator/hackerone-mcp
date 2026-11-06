@@ -3,6 +3,8 @@
 
 mod endpoint;
 #[cfg(test)]
+mod hacktivity_tests;
+#[cfg(test)]
 mod post_tests;
 mod retry;
 #[cfg(test)]
@@ -16,8 +18,9 @@ use serde_json::Value;
 
 use crate::config::Credentials;
 use crate::error::{Error, Result};
+pub(crate) use endpoint::parse_date;
 use endpoint::{Endpoint, MAX_PAGE_SIZE};
-pub use endpoint::{PageParams, ScopeFilters};
+pub use endpoint::{HacktivityFilters, HacktivitySort, PageParams, ScopeFilters};
 pub(crate) use endpoint::{validate_handle, validate_report_id};
 use retry::{RetryPolicy, parse_retry_after};
 
@@ -168,6 +171,21 @@ impl H1Client {
         })
         .await
         .map_err(|_| submission_uncertain("request timed out"))?
+    }
+
+    /// One page of disclosed Hacktivity. Returns the JSON body and its wire byte length.
+    pub(crate) async fn hacktivity(
+        &self,
+        page: PageParams,
+        filters: &HacktivityFilters,
+        sort: HacktivitySort,
+    ) -> Result<(Value, usize)> {
+        self.get_json(&Endpoint::Hacktivity {
+            page,
+            filters,
+            sort,
+        })
+        .await
     }
 
     pub async fn program(&self, handle: &str) -> Result<Value> {

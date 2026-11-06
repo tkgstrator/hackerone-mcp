@@ -6,7 +6,10 @@ use tempfile::TempDir;
 
 use super::*;
 
-const EXPECTED: [&str; 21] = [
+const EXPECTED: [&str; 24] = [
+    "hacktivity_search",
+    "hacker_activity",
+    "hacktivity_trends",
     "report_list",
     "report_get",
     "report_updates",
@@ -44,7 +47,7 @@ fn names() -> (TempDir, Vec<String>) {
 }
 
 #[test]
-fn tool_set_is_exactly_the_expected_twenty_one() {
+fn tool_set_is_exactly_the_expected_twenty_four() {
     let (_t, n) = names();
     let got: BTreeSet<&str> = n.iter().map(String::as_str).collect();
     let want: BTreeSet<&str> = EXPECTED.into_iter().collect();
@@ -69,6 +72,25 @@ fn submission_defaults_disabled_and_has_side_effect_annotations() {
     assert_eq!(annotations.destructive_hint, Some(true));
     assert_eq!(annotations.idempotent_hint, Some(false));
     assert_eq!(annotations.open_world_hint, Some(true));
+}
+
+#[test]
+fn public_insights_are_read_only() {
+    let t = TempDir::new().unwrap();
+    let store = Arc::new(DraftStore::open(t.path().join("d")).unwrap());
+    let server = HackerOneServer::new(None, store);
+    for name in ["hacktivity_search", "hacker_activity", "hacktivity_trends"] {
+        let tool = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .unwrap();
+        let annotations = tool.annotations.unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.open_world_hint, Some(true));
+    }
 }
 
 #[test]

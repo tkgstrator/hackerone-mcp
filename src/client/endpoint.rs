@@ -1,7 +1,10 @@
 //! Typed HackerOne hacker-API endpoints. URLs are built only from
 //! validated local parameters; nothing here accepts a path, URL or method.
 
+use chrono::NaiveDate;
 use reqwest::Url;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
@@ -71,6 +74,155 @@ impl ScopeFilters {
     }
 }
 
+const MAX_CWE_BYTES: usize = 200;
+const SEVERITIES: [&str; 5] = ["none", "low", "medium", "high", "critical"];
+
+/// Optional filters for `GET /v1/hackers/hacktivity`. Every value is validated
+/// locally before any request and compiled into one quoted/escaped Lucene
+/// `queryString`; raw Lucene is never accepted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub struct HacktivityFilters {
+    /// Reporter handle, `[A-Za-z0-9_-]{1,64}`.
+    pub username: Option<String>,
+    /// Program handle, `[A-Za-z0-9_-]{1,64}`.
+    pub program: Option<String>,
+    /// Exact weakness label, 1..=200 UTF-8 bytes, nonblank, no control characters.
+    pub cwe: Option<String>,
+    /// Severity rating label, e.g. `high`.
+    pub severity_rating: Option<String>,
+    /// Inclusive UTC disclosure start, `YYYY-MM-DD`.
+    pub disclosed_after: Option<String>,
+    /// Exclusive UTC disclosure end, `YYYY-MM-DD`.
+    pub disclosed_before: Option<String>,
+}
+
+impl HacktivityFilters {
+    /// Validate every supplied filter without touching the network.
+    pub fn validate(&self) -> Result<()> {
+        for handle in [&self.username, &self.program].into_iter().flatten() {
+            validate_handle(handle)?;
+        }
+        if let Some(cwe) = &self.cwe
+            && (cwe.len() > MAX_CWE_BYTES
+                || cwe.trim().is_empty()
+                || cwe.chars().any(char::is_control))
+        {
+            return Err(Error::Validation(format!(
+                "cwe must be 1..={MAX_CWE_BYTES} bytes, nonblank, without control characters"
+            )));
+        }
+        if let Some(sev) = &self.severity_rating
+            && !SEVERITIES.contains(&sev.as_str())
+        {
+            return Err(Error::Validation(
+                "severity_rating must be one of none, low, medium, high, critical".into(),
+            ));
+        }
+        let after = self
+            .disclosed_after
+            .as_deref()
+            .map(parse_date)
+            .transpose()?;
+        let before = self
+            .disclosed_before
+            .as_deref()
+            .map(parse_date)
+            .transpose()?;
+        if let (Some(a), Some(b)) = (after, before)
+            && a >= b
+        {
+            return Err(Error::Validation(
+                "disclosed_after must be earlier than disclosed_before".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Lucene `queryString`. Call only after `validate()`: handles, severity and
+    /// dates use restricted grammars, so only the CWE needs quote escaping.
+    fn query_string(&self) -> String {
+        let mut q = String::from("disclosed:true");
+        if let Some(v) = &self.username {
+            q.push_str(&format!(" AND reporter:\"{v}\""));
+        }
+        if let Some(v) = &self.program {
+            q.push_str(&format!(" AND team:\"{v}\""));
+        }
+        if let Some(v) = &self.cwe {
+            let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
+            q.push_str(&format!(" AND cwe:\"{escaped}\""));
+        }
+        if let Some(v) = &self.severity_rating {
+            q.push_str(&format!(" AND severity_rating:\"{v}\""));
+        }
+        if self.disclosed_after.is_some() || self.disclosed_before.is_some() {
+            let after = self.disclosed_after.as_deref().unwrap_or("*");
+            let before = self.disclosed_before.as_deref().unwrap_or("*");
+            q.push_str(&format!(" AND disclosed_at:[{after} TO {before}}}"));
+        }
+        q
+    }
+}
+
+/// Documented Hacktivity sort whitelist (Hacker Resources, 2026-09-23 revision).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub enum HacktivitySort {
+    #[serde(rename = "latest_disclosable_activity_at")]
+    RecentActivityAsc,
+    #[default]
+    #[serde(rename = "-latest_disclosable_activity_at")]
+    RecentActivityDesc,
+    #[serde(rename = "disclosed_at")]
+    DisclosedAtAsc,
+    #[serde(rename = "-disclosed_at")]
+    DisclosedAtDesc,
+    #[serde(rename = "total_awarded_amount")]
+    AwardedAmountAsc,
+    #[serde(rename = "-total_awarded_amount")]
+    AwardedAmountDesc,
+    #[serde(rename = "votes")]
+    VotesAsc,
+    #[serde(rename = "-votes")]
+    VotesDesc,
+}
+
+impl HacktivitySort {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RecentActivityAsc => "latest_disclosable_activity_at",
+            Self::RecentActivityDesc => "-latest_disclosable_activity_at",
+            Self::DisclosedAtAsc => "disclosed_at",
+            Self::DisclosedAtDesc => "-disclosed_at",
+            Self::AwardedAmountAsc => "total_awarded_amount",
+            Self::AwardedAmountDesc => "-total_awarded_amount",
+            Self::VotesAsc => "votes",
+            Self::VotesDesc => "-votes",
+        }
+    }
+}
+
+/// Parse exactly `YYYY-MM-DD`, a real calendar date within 2000-01-01..=9999-12-31.
+pub(crate) fn parse_date(value: &str) -> Result<NaiveDate> {
+    let invalid =
+        || Error::Validation("date must be a real YYYY-MM-DD date from 2000-01-01".into());
+    let shape = value.len() == 10
+        && value.bytes().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        });
+    if !shape {
+        return Err(invalid());
+    }
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| invalid())?;
+    if date < NaiveDate::from_ymd_opt(2000, 1, 1).ok_or_else(invalid)? {
+        return Err(invalid());
+    }
+    Ok(date)
+}
+
 pub fn validate_handle(handle: &str) -> Result<()> {
     let ok = (1..=MAX_HANDLE_LEN).contains(&handle.len())
         && handle
@@ -126,6 +278,11 @@ pub(super) enum Endpoint<'a> {
     ScopeExclusions {
         handle: &'a str,
     },
+    Hacktivity {
+        page: PageParams,
+        filters: &'a HacktivityFilters,
+        sort: HacktivitySort,
+    },
 }
 
 const PROGRAMS: &[&str] = &["v1", "hackers", "programs"];
@@ -164,6 +321,10 @@ impl Endpoint<'_> {
                 validate_handle(handle)?;
                 (PROGRAMS, vec![*handle, "weaknesses"], *page)
             }
+            Self::Hacktivity { page, filters, .. } => {
+                filters.validate()?;
+                (&["v1", "hackers", "hacktivity"], vec![], *page)
+            }
             Self::ScopeExclusions { handle } => {
                 validate_handle(handle)?;
                 (
@@ -182,6 +343,10 @@ impl Endpoint<'_> {
         }
         {
             let mut q = url.query_pairs_mut();
+            if let Self::Hacktivity { filters, sort, .. } = self {
+                q.append_pair("queryString", &filters.query_string());
+                q.append_pair("sort", sort.as_str());
+            }
             if let Some(n) = page.number {
                 q.append_pair("page[number]", &n.to_string());
             }

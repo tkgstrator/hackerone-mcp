@@ -5,6 +5,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::*;
 
 const USER: &str = "alice_user";
+
+#[test]
+fn hacktivity_reward_numeric_lexeme_survives_json_parsing() {
+    // Money must reach the insights parser without an intermediate f64 round trip.
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"total_awarded_amount":9007199254740993.000001}"#).unwrap();
+    assert_eq!(
+        value["total_awarded_amount"].to_string(),
+        "9007199254740993.000001"
+    );
+}
 const KEY: &str = "s3cr3t-key-XYZ";
 
 fn creds() -> Credentials {

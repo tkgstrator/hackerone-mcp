@@ -13,12 +13,15 @@ local reply drafts for manual sending in the HackerOne web UI.
 
 HTTP code stays in `src/client/`, with a fixed `https://api.hackerone.com` origin and redirects
 disabled. Reads retain bounded retries; report submission uses a separate client with retries
-disabled and a persistent single-attempt ledger. Guard tests pin all 21 tools and submission annotations.
+disabled and a persistent single-attempt ledger. Guard tests pin all 24 tools and submission annotations.
 
 ## Tools
 
 | Tool                         | Description                                                     | Parameters                                                                                                                                                                                     |
 | ---------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hacktivity_search`          | Search one page of selected public disclosed report metadata | `username`, `program`, `cwe`, `severity_rating`, `disclosed_after`, `disclosed_before`, `sort`, `page`, `page_size` |
+| `hacker_activity`           | Bounded public report cohort: cadence, specialties, report rewards | `username`, `max_pages` (default 3, max 10) |
+| `hacktivity_trends`         | Compare two UTC disclosure windows by weakness, severity, program and reporter | `days` (default 30, max 90), `end_date`, `program`, `cwe`, `severity_rating`, `max_pages` per window |
 | `report_list`                | List one page of your submitted reports (needs credentials)     | `page`, `page_size`                                                                                                                                                                            |
 | `report_get`                 | Get one submitted report: state, `submitted_at`, activities, bounties | `report_id` (decimal string, no leading zeros)                                                                                                                                           |
 | `report_updates`             | Compare returned status and activities with a local baseline | `report_id`, `mark_seen` (default true) |
@@ -45,6 +48,52 @@ API reads, submission preparation and submission need HackerOne credentials. Loc
 reply draft save/get and submission receipt lookup work without credentials.
 `weakness_id` and `structured_scope_id` are HackerOne's integer ids (take them from
 `program_submission_options`), not CWE numbers.
+
+## Public activity and trends
+
+These tools use the official `GET /v1/hackers/hacktivity` endpoint and require API credentials.
+They select only publicly disclosed report metadata and omit vulnerability bodies/generated summaries.
+They do not search a user directory, retrieve private profiles or provide an official leaderboard.
+An empty username result means no matching visible activity, not that the account does not exist.
+
+```json
+{"name":"hacktivity_search","arguments":{"username":"jobert","page_size":10}}
+{"name":"hacker_activity","arguments":{"username":"jobert","max_pages":3}}
+{"name":"hacktivity_trends","arguments":{"days":30,"max_pages":3}}
+{"name":"hacktivity_trends","arguments":{"days":30,"program":"security","cwe":"Information Disclosure"}}
+```
+
+`cwe` is the API's exact weakness **label**, not a CWE-number lookup. Handles, calendar dates,
+severity and sort values are validated before network access. Search dates are UTC `YYYY-MM-DD`:
+`disclosed_after` is inclusive and `disclosed_before` exclusive. Search supports the documented
+ascending/descending sorts for `latest_disclosable_activity_at`, `disclosed_at`,
+`total_awarded_amount` and `votes` (prefix `-` for descending).
+
+`hacker_activity` describes the **retrieved disclosure cohort**. Monthly submission counts and
+median gaps use `submitted_at` normalized to UTC; they do not establish the person's full finding
+cadence, validity rate, investigation hours or hourly efficiency. Nonpublic/undisclosed reports
+are absent. Trend windows use `disclosed_at`, so they describe disclosure activity, not discovery.
+The default end is today's UTC midnight (exclusive), comparing the preceding 30 days with the
+30 days before that. No scheduler or full-platform historical database is created.
+
+Published rewards are **report-level amounts**, not a person's total income, profit, payout or
+collaborator share. Missing amounts stay unknown; known zero stays zero. Sums and medians use
+exact decimal arithmetic and return decimal strings. Explicit currencies are grouped separately;
+missing currency is grouped only within the same known program. Amounts with neither currency nor
+a program identity have counts but no monetary sum/median. There is no assumed USD conversion.
+
+Each cohort reads up to `max_pages` of 100 reports. A shared 45-second deadline and 5 MiB admitted
+response budget cover the whole call, including both trend windows. The existing client may read
+one additional bounded response (up to 4 MiB) before rejecting that page at the admission budget;
+received and admitted bytes are reported separately. Returned pagination URLs are never followed.
+Coverage reports duplicates, excluded/invalid rows, source exhaustion and stop reasons. Late
+errors preserve prior results. Incomplete cohorts suppress comparative growth figures. Even an
+exhausted API result is an observed public cohort, not proof of all platform activity.
+
+Group/reward/recent-report lists have at most 10 entries with omission counts; search pages have
+at most 100. Responses are capped at 1 MiB; optional lists are trimmed if necessary and
+`output_truncated` / `output_omitted_entries` expose that extra trimming. API-derived text stays
+inside an untrusted-data envelope.
 
 ## Checking submitted reports
 
@@ -355,7 +404,7 @@ bun install --frozen-lockfile --ignore-scripts && bunx commitlint --last --verbo
 ```
 
 `tests/stdio_e2e.rs` spawns the real binary and talks JSON-RPC over stdio. `scripts/docker-smoke.sh`
-starts the image, checks `initialize`, that `tools/list` returns 21 tools, and a `draft_create` /
+starts the image, checks `initialize`, that `tools/list` returns 24 tools, and a `draft_create` /
 `draft_get` round trip.
 
 ### Commits
