@@ -8,12 +8,14 @@ HackerOne Hacker API, tracks submitted reports and stores drafts as files on you
 
 Remote submission is disabled by default. Enable `H1_MCP_ALLOW_SUBMIT=true` to use
 `report_submit` after reviewing a prepared preview and explicitly approving its recipient and body.
-Preparation, validation and all other draft operations send nothing to HackerOne. Comments remain
-local reply drafts for manual sending in the HackerOne web UI.
+Preparation, validation and all other draft operations send nothing to HackerOne. Reply drafts
+(`report_reply_draft`) remain local for manual sending in the HackerOne web UI. Public report comments
+are separate: `report_comment_submit` posts one approved comment through the optional Customer API,
+only with `H1_MCP_ALLOW_SUBMIT=true` and Customer API credentials that have Report Management permission.
 
 HTTP code stays in `src/client/`, with a fixed `https://api.hackerone.com` origin and redirects
 disabled. Reads retain bounded retries; report submission uses a separate client with retries
-disabled and a persistent single-attempt ledger. Guard tests pin all 24 tools and submission annotations.
+disabled and a persistent single-attempt ledger. Guard tests pin all 27 tools and submission annotations.
 
 ## Tools
 
@@ -30,6 +32,9 @@ disabled and a persistent single-attempt ledger. Guard tests pin all 24 tools an
 | `report_submit_prepare`      | Validate and persist an exact submission preview; no POST | `draft_id`, `expected_revision` |
 | `report_submit`              | Submit the explicitly approved preview once; requires opt-in | `draft_id`, `expected_revision`, `confirmation_token`, `confirm` |
 | `report_submission_get`      | Read the local submission receipt or uncertain status | `draft_id` |
+| `report_comment_prepare`     | Preview an exact PUBLIC report comment (Customer API); no POST | `report_id`, `message` |
+| `report_comment_submit`      | Post the approved comment once; requires opt-in and Customer API permission | `comment_id`, `confirmation_token`, `confirm` |
+| `report_comment_get`         | Read the local comment receipt or uncertain status | `comment_id` |
 | `program_discover`           | Discover eligible iOS programs from a bounded source page       | `page`, `page_size`, `public_only`, `accepting_submissions_only`, `bounty_only` |
 | `program_list`               | List programs visible to your account (needs credentials)       | `page`, `page_size`                                                                                                                                                                            |
 | `program_get`                | Get one program incl. policy and submission state               | `handle`                                                                                                                                                                                       |
@@ -133,10 +138,22 @@ One baseline is retained per report in a volume; switching API accounts starts a
 
 Reply text is stored locally (nonblank, no NUL, up to 200,000 UTF-8 bytes). The returned fixed report
 URL is for manually sending it in the web UI. The public [Hacker API](https://api.hackerone.com/hacker-resources/)
-does not document comment creation; this server does not use the separate Customer API or browser cookies.
+does not document comment creation; replies stay local drafts. Customer API comments use the separate `report_comment_*` tools.
 Snapshots retain at most 1000 observed activity IDs and 8 MiB of private JSON. Exceeding a bound fails
 without advancing; use `report_get` to inspect the current API response directly.
 
+## Public report comments (Customer API)
+
+`report_comment_prepare` stores an account-bound exact preview of
+`POST /v1/reports/{id}/activities` with `internal: false` (public within the report's existing
+audience; this does not disclose the report). `report_comment_submit` (needs `H1_MCP_ALLOW_SUBMIT=true`,
+`confirm=true`, `comment_id` and token) consumes the attempt durably before one POST, with no retries.
+`report_comment_get` reads the receipt. A success requires an `activity-comment` ID.
+
+This is the documented **Customer API** endpoint and needs credentials with Report Management
+permission. A Hacker API token that works for `report_get` may get HTTP 401/403 here; the failure is
+recorded as an uncertain consumed attempt (inspect HackerOne, then prepare a new comment). The public
+Hacker API documents no comment endpoint, so none is guessed; browser cookies and attachments are unsupported.
 ## Preparing and submitting a report
 
 1. Create and validate a complete local draft, including `team_handle`, title, body and `impact`.
@@ -406,7 +423,7 @@ bun install --frozen-lockfile --ignore-scripts && bunx commitlint --last --verbo
 ```
 
 `tests/stdio_e2e.rs` spawns the real binary and talks JSON-RPC over stdio. `scripts/docker-smoke.sh`
-starts the image, checks `initialize`, that `tools/list` returns 24 tools, and a `draft_create` /
+starts the image, checks `initialize`, that `tools/list` returns 27 tools, and a `draft_create` /
 `draft_get` round trip.
 
 ### Commits

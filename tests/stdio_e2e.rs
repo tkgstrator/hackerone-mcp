@@ -141,7 +141,7 @@ fn private_dir() -> tempfile::TempDir {
     d
 }
 
-const EXPECTED: [&str; 24] = [
+const EXPECTED: [&str; 27] = [
     "hacktivity_search",
     "hacker_activity",
     "hacktivity_trends",
@@ -153,6 +153,9 @@ const EXPECTED: [&str; 24] = [
     "report_submit_prepare",
     "report_submit",
     "report_submission_get",
+    "report_comment_prepare",
+    "report_comment_submit",
+    "report_comment_get",
     "program_discover",
     "program_list",
     "program_get",

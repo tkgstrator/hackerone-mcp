@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 use super::*;
 
-const EXPECTED: [&str; 24] = [
+const EXPECTED: [&str; 27] = [
     "hacktivity_search",
     "hacker_activity",
     "hacktivity_trends",
@@ -18,6 +18,9 @@ const EXPECTED: [&str; 24] = [
     "report_submit_prepare",
     "report_submit",
     "report_submission_get",
+    "report_comment_prepare",
+    "report_comment_submit",
+    "report_comment_get",
     "program_discover",
     "program_list",
     "program_get",
@@ -47,7 +50,7 @@ fn names() -> (TempDir, Vec<String>) {
 }
 
 #[test]
-fn tool_set_is_exactly_the_expected_twenty_four() {
+fn tool_set_is_exactly_the_expected_twenty_seven() {
     let (_t, n) = names();
     let got: BTreeSet<&str> = n.iter().map(String::as_str).collect();
     let want: BTreeSet<&str> = EXPECTED.into_iter().collect();
@@ -119,4 +122,17 @@ fn http_building_stays_in_the_client_module() {
             .join("src")
             .as_path(),
     );
+}
+
+#[test]
+fn comment_tools_are_write_gated_and_get_is_read_only() {
+    let t = TempDir::new().unwrap();
+    let store = Arc::new(DraftStore::open(t.path().join("d")).unwrap());
+    let server = HackerOneServer::new(None, store);
+    let tools = server.tool_router.list_all();
+    let find = |name: &str| tools.iter().find(|t| t.name == name).unwrap();
+    let submit = find("report_comment_submit").annotations.clone().unwrap();
+    assert_eq!(submit.read_only_hint, Some(false));
+    assert_eq!(submit.destructive_hint, Some(true));
+    assert_eq!(submit.idempotent_hint, Some(false));
 }

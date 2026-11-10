@@ -257,6 +257,9 @@ pub fn validate_report_id(id: &str) -> Result<()> {
 #[derive(Debug, Clone)]
 pub(super) enum Endpoint<'a> {
     CreateReport,
+    CreateComment {
+        id: &'a str,
+    },
     Reports {
         page: PageParams,
     },
@@ -297,6 +300,14 @@ impl Endpoint<'_> {
         // (base path segments, validated trailing segments, pagination)
         let (base, tail, page): (&[&str], Vec<&str>, PageParams) = match self {
             Self::CreateReport => (&["v1", "hackers", "reports"], vec![], PageParams::default()),
+            Self::CreateComment { id } => {
+                validate_report_id(id)?;
+                (
+                    &["v1", "reports"],
+                    vec![*id, "activities"],
+                    PageParams::default(),
+                )
+            }
             Self::Reports { page } => (&["v1", "hackers", "me", "reports"], vec![], *page),
             Self::Report { id } => {
                 validate_report_id(id)?;

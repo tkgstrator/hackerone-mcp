@@ -154,3 +154,96 @@ async fn post_timeout_is_one_attempt_and_uncertain() {
     assert!(error.contains("outcome uncertain"), "{error}");
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
+
+const COMMENT: &str = "{\"data\":{\"type\":\"activity-comment\",\"attributes\":{\"message\":\"Private note\",\"internal\":false}}}";
+
+fn comment_accepted() -> Value {
+    json!({"data":{"type":"activity-comment","id":"987"}})
+}
+
+#[tokio::test]
+async fn comment_post_uses_customer_activity_endpoint_with_exact_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/reports/12345/activities"))
+        .and(header("content-type", "application/json"))
+        .and(basic_auth("test_user", "test_key"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(comment_accepted()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let value = client(&server)
+        .post_report_comment("12345", COMMENT.into())
+        .await
+        .unwrap();
+    assert_eq!(value, comment_accepted());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].body, COMMENT.as_bytes());
+    assert!(requests[0].url.query().is_none());
+}
+
+#[tokio::test]
+async fn comment_invalid_report_id_fails_before_network() {
+    let server = MockServer::start().await;
+    for id in ["", "0", "01", "1/../2", "1?x=1", "123456789012345678901"] {
+        assert!(
+            client(&server)
+                .post_report_comment(id, COMMENT.into())
+                .await
+                .is_err(),
+            "{id}"
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn comment_errors_never_retry_leak_bodies_and_explain_permission() {
+    for status in [401, 403, 429, 500] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_string("Private note test_key echo"),
+            )
+            .mount(&server)
+            .await;
+        let error = client(&server)
+            .post_report_comment("12345", COMMENT.into())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&status.to_string()) && error.contains("outcome uncertain"));
+        assert_eq!(
+            error.contains("permission"),
+            status == 401 || status == 403,
+            "{error}"
+        );
+        for secret in ["Private note", "test_key", "echo"] {
+            assert!(!error.contains(secret), "{error}");
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn comment_success_requires_activity_comment_receipt() {
+    for response in [
+        json!({"data":{"type":"report","id":"987"}}),
+        json!({"data":{"type":"activity-comment","id":"0987"}}),
+        json!({"data":{"type":"activity-comment","id":987}}),
+        json!({"data":{"type":"activity-comment"}}),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(response))
+            .mount(&server)
+            .await;
+        let error = client(&server)
+            .post_report_comment("12345", COMMENT.into())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outcome uncertain"), "{error}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}

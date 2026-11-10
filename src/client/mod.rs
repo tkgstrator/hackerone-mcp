@@ -127,10 +127,22 @@ impl H1Client {
     /// No error includes API response text, request bytes or credentials.
     pub async fn submit_report(&self, body: String) -> Result<Value> {
         let url = Endpoint::CreateReport.url(&self.origin)?;
+        self.post_once(url, body, "report").await
+    }
+
+    /// Customer API public comment (`POST /v1/reports/{id}/activities`), once.
+    /// Same durable-claim contract as `submit_report`; the receipt must be an
+    /// `activity-comment`. Needs Customer API credentials with Report Management.
+    pub async fn post_report_comment(&self, report_id: &str, body: String) -> Result<Value> {
+        let url = Endpoint::CreateComment { id: report_id }.url(&self.origin)?;
+        self.post_once(url, body, "activity-comment").await
+    }
+
+    async fn post_once(&self, url: Url, body: String, receipt_type: &str) -> Result<Value> {
         tokio::time::timeout(self.retry.request_timeout, async {
             #[expect(
                 clippy::disallowed_methods,
-                reason = "the sole typed report POST uses a durable claim, explicit opt-in and no retries"
+                reason = "the typed POSTs use a durable claim, explicit opt-in and no retries"
             )]
             let response = self
                 .post_http
@@ -145,7 +157,16 @@ impl H1Client {
             let status = response.status();
             if !status.is_success() {
                 // Do not read or quote an error body: it can echo the report.
-                return Err(submission_uncertain(&format!("HTTP {}", status.as_u16())));
+                let hint = if receipt_type == "activity-comment" && matches!(status.as_u16(), 401 | 403)
+                {
+                    "; Customer API credentials with Report Management permission are required (permission denied)"
+                } else {
+                    ""
+                };
+                return Err(submission_uncertain(&format!(
+                    "HTTP {}{hint}",
+                    status.as_u16()
+                )));
             }
             let bytes = self.read_body(response).await.map_err(|_| {
                 submission_uncertain(&format!(
@@ -156,14 +177,14 @@ impl H1Client {
             let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
                 submission_uncertain(&format!("HTTP {} invalid JSON response", status.as_u16()))
             })?;
-            let valid = value.pointer("/data/type").and_then(Value::as_str) == Some("report")
+            let valid = value.pointer("/data/type").and_then(Value::as_str) == Some(receipt_type)
                 && value
                     .pointer("/data/id")
                     .and_then(Value::as_str)
                     .is_some_and(|id| validate_report_id(id).is_ok());
             if !valid {
                 return Err(submission_uncertain(&format!(
-                    "HTTP {} invalid report receipt",
+                    "HTTP {} invalid {receipt_type} receipt",
                     status.as_u16()
                 )));
             }

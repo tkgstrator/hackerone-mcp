@@ -91,7 +91,7 @@ fn encode(record: &Submission) -> H1Result<Value> {
         .map_err(|_| Error::Draft("cannot serialize submission ledger".into()))
 }
 
-fn token() -> H1Result<String> {
+pub(super) fn token() -> H1Result<String> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
