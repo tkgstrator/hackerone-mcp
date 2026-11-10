@@ -155,31 +155,49 @@ async fn post_timeout_is_one_attempt_and_uncertain() {
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
-const COMMENT: &str = "{\"data\":{\"type\":\"activity-comment\",\"attributes\":{\"message\":\"Private note\",\"internal\":false}}}";
+const BEARER: &str = "Bearer dGVzdF91c2VyOnRlc3Rfa2V5";
+const MESSAGE: &str = "Private note";
 
-fn comment_accepted() -> Value {
-    json!({"data":{"type":"activity-comment","id":"987"}})
+fn comment_body() -> String {
+    json!({"operationName":graphql::OPERATION,
+        "query":graphql::MUTATION,
+        "variables":{"reportId":"Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMjM0NQ==","message":MESSAGE,"internal":false}})
+    .to_string()
+}
+
+fn gql_receipt(message: &str, internal: bool, id: Value) -> Value {
+    json!({"data":{"createActivityComment":{"was_successful":true,"errors":{"edges":[]},
+        "activity":{"__typename":"ActivitiesComment","id":"Z2lkOi8vaGFja2Vyb25lL0FjdGl2aXRpZXM6OkNvbW1lbnQvOTg3","databaseId":id,
+            "message":message,"internal":internal}}}})
+}
+
+fn gql_accepted() -> Value {
+    gql_receipt(MESSAGE, false, json!("987"))
 }
 
 #[tokio::test]
-async fn comment_post_uses_customer_activity_endpoint_with_exact_bytes() {
+async fn comment_post_uses_graphql_bearer_with_exact_bytes() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1/reports/12345/activities"))
+        .and(path("/graphql"))
         .and(header("content-type", "application/json"))
-        .and(basic_auth("test_user", "test_key"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(comment_accepted()))
+        .and(header("authorization", BEARER))
+        .respond_with(ResponseTemplate::new(200).set_body_json(gql_accepted()))
         .expect(1)
         .mount(&server)
         .await;
     let value = client(&server)
-        .post_report_comment("12345", COMMENT.into())
+        .post_report_comment("12345", comment_body())
         .await
         .unwrap();
-    assert_eq!(value, comment_accepted());
+    // The accepted receipt is normalized for the existing workflow.
+    assert_eq!(value["data"]["type"], "activity-comment");
+    assert_eq!(value["data"]["id"], "987");
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].body, COMMENT.as_bytes());
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body, comment_body().as_bytes());
     assert!(requests[0].url.query().is_none());
+    assert!(!requests[0].headers.contains_key("cookie"));
 }
 
 #[tokio::test]
@@ -188,7 +206,7 @@ async fn comment_invalid_report_id_fails_before_network() {
     for id in ["", "0", "01", "1/../2", "1?x=1", "123456789012345678901"] {
         assert!(
             client(&server)
-                .post_report_comment(id, COMMENT.into())
+                .post_report_comment(id, comment_body())
                 .await
                 .is_err(),
             "{id}"
@@ -198,27 +216,44 @@ async fn comment_invalid_report_id_fails_before_network() {
 }
 
 #[tokio::test]
-async fn comment_errors_never_retry_leak_bodies_and_explain_permission() {
+async fn comment_rejects_unfixed_query_before_network() {
+    let server = MockServer::start().await;
+    let mut request: Value = serde_json::from_str(&comment_body()).unwrap();
+    request["query"] =
+        json!("mutation AddCommentToHackerOneReport { createActivityComment { was_successful } }");
+    assert!(
+        client(&server)
+            .post_report_comment("12345", request.to_string())
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn comment_errors_never_retry_or_leak_bodies_or_credentials() {
     for status in [401, 403, 429, 500] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
+            .and(path("/graphql"))
             .respond_with(
-                ResponseTemplate::new(status).set_body_string("Private note test_key echo"),
+                ResponseTemplate::new(status)
+                    .set_body_string("Private note test_key dGVzdF91c2VyOnRlc3Rfa2V5 echo"),
             )
             .mount(&server)
             .await;
         let error = client(&server)
-            .post_report_comment("12345", COMMENT.into())
+            .post_report_comment("12345", comment_body())
             .await
             .unwrap_err()
             .to_string();
         assert!(error.contains(&status.to_string()) && error.contains("outcome uncertain"));
-        assert_eq!(
-            error.contains("permission"),
-            status == 401 || status == 403,
-            "{error}"
-        );
-        for secret in ["Private note", "test_key", "echo"] {
+        for secret in [
+            "Private note",
+            "test_key",
+            "dGVzdF91c2VyOnRlc3Rfa2V5",
+            "echo",
+        ] {
             assert!(!error.contains(secret), "{error}");
         }
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
@@ -226,24 +261,158 @@ async fn comment_errors_never_retry_leak_bodies_and_explain_permission() {
 }
 
 #[tokio::test]
-async fn comment_success_requires_activity_comment_receipt() {
+async fn comment_redirect_is_not_followed_or_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(307).insert_header("location", "/elsewhere"))
+        .mount(&server)
+        .await;
+    let error = client(&server)
+        .post_report_comment("12345", comment_body())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("307") && error.contains("outcome uncertain"),
+        "{error}"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn comment_http_200_graphql_failures_are_uncertain_single_attempts() {
+    let mut unsuccessful = gql_accepted();
+    unsuccessful["data"]["createActivityComment"]["was_successful"] = json!(false);
+    let mut mutation_errors = gql_accepted();
+    mutation_errors["data"]["createActivityComment"]["errors"] = json!({"edges":[
+        {"node":{"field":"message","message":"Private note rejected test_key"}}]});
+    let mut no_activity = gql_accepted();
+    no_activity["data"]["createActivityComment"]["activity"] = Value::Null;
+    let mut missing_errors = gql_accepted();
+    missing_errors["data"]["createActivityComment"]
+        .as_object_mut()
+        .unwrap()
+        .remove("errors");
+    let mut null_errors = gql_accepted();
+    null_errors["data"]["createActivityComment"]["errors"] = Value::Null;
+    let mut null_edges = gql_accepted();
+    null_edges["data"]["createActivityComment"]["errors"] = json!({"edges":null});
     for response in [
-        json!({"data":{"type":"report","id":"987"}}),
-        json!({"data":{"type":"activity-comment","id":"0987"}}),
-        json!({"data":{"type":"activity-comment","id":987}}),
-        json!({"data":{"type":"activity-comment"}}),
+        json!({"errors":[{"message":"Private note test_key not authorized"}],"data":null}),
+        json!({"errors":[{"message":"partial"}],"data":gql_accepted()["data"]}),
+        unsuccessful,
+        mutation_errors,
+        missing_errors,
+        null_errors,
+        null_edges,
+        no_activity,
+        json!({"data":{"createActivityComment":null}}),
+        json!({"data":null}),
+        json!({}),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(response))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .mount(&server)
             .await;
         let error = client(&server)
-            .post_report_comment("12345", COMMENT.into())
+            .post_report_comment("12345", comment_body())
             .await
             .unwrap_err()
             .to_string();
         assert!(error.contains("outcome uncertain"), "{error}");
+        for secret in ["Private note", "test_key", "not authorized", "rejected"] {
+            assert!(!error.contains(secret), "{error}");
+        }
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn comment_success_requires_matching_activity_comment_receipt() {
+    let mut wrong_kind = gql_accepted();
+    wrong_kind["data"]["createActivityComment"]["activity"] =
+        json!({"__typename":"ActivitiesBugClosed","id":"not-a-valid-id"});
+    let mut no_internal = gql_accepted();
+    no_internal["data"]["createActivityComment"]["activity"]
+        .as_object_mut()
+        .unwrap()
+        .remove("internal");
+    for response in [
+        wrong_kind,
+        no_internal,
+        gql_receipt("Different message", false, json!("987")),
+        gql_receipt(MESSAGE, true, json!("987")),
+        gql_receipt(MESSAGE, false, json!("0987")),
+        gql_receipt(MESSAGE, false, json!("0")),
+        gql_receipt(MESSAGE, false, json!(987)),
+        gql_receipt(MESSAGE, false, json!("98x")),
+        gql_receipt(MESSAGE, false, json!("123456789012345678901")),
+        gql_receipt(MESSAGE, false, Value::Null),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+        let error = client(&server)
+            .post_report_comment("12345", comment_body())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outcome uncertain"), "{error}");
+        assert!(!error.contains("Different message"), "{error}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn comment_malformed_oversized_and_timeout_are_single_uncertain_attempts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Private note not json"))
+        .mount(&server)
+        .await;
+    let error = client(&server)
+        .post_report_comment("12345", comment_body())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("outcome uncertain") && !error.contains("Private note"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(gql_accepted()))
+        .mount(&server)
+        .await;
+    let mut c = client(&server);
+    c.limits.response_bytes = 32;
+    let error = c
+        .post_report_comment("12345", comment_body())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("outcome uncertain"), "{error}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(gql_accepted())
+                .set_delay(Duration::from_secs(3)),
+        )
+        .mount(&server)
+        .await;
+    let mut c = client(&server);
+    c.retry.request_timeout = Duration::from_millis(500);
+    let error = c
+        .post_report_comment("12345", comment_body())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("outcome uncertain"), "{error}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }

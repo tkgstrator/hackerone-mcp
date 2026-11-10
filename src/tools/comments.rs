@@ -1,7 +1,7 @@
-//! Reviewed local previews and one-shot public report comments (Customer API).
+//! Reviewed local previews and one-shot public report comments (researcher GraphQL).
 
 use super::HackerOneServer;
-use crate::client::validate_report_id;
+use crate::client::{graphql, validate_report_id};
 use crate::draft::model::{MAX_BODY_BYTES, now_secs, random_token};
 use crate::error::{Error, Result as H1Result};
 use rmcp::handler::server::wrapper::Parameters;
@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const GUIDANCE: &str = "This posts a PUBLIC (internal=false) comment within the report's existing audience through the Customer API (POST /v1/reports/{id}/activities), which needs Customer API credentials with Report Management permission; a working Hacker API token does not establish that. Only call report_comment_submit after showing the exact preview and receiving explicit user approval; a preview token is not proof of approval. Each comment_id is a single attempt, never retried; if uncertain, inspect HackerOne before preparing a new comment.";
+const GUIDANCE: &str = "This posts a PUBLIC (internal=false) comment within the report's existing audience through the HackerOne GraphQL API (https://hackerone.com/graphql) using your personal researcher API token. Only call report_comment_submit after showing the exact preview and receiving explicit user approval; a preview token is not proof of approval. Each comment_id is a single attempt, never retried; if uncertain, inspect HackerOne before preparing a new comment.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,11 +51,31 @@ fn validate_comment_id(id: &str) -> H1Result<()> {
     }
 }
 
-fn request_body(message: &str) -> H1Result<String> {
+/// Exact schema-1 (retired Customer REST) payload, kept to validate old ledgers.
+fn legacy_request_body(message: &str) -> H1Result<String> {
     serde_json::to_string(
         &json!({"data":{"type":"activity-comment","attributes":{"message":message,"internal":false}}}),
     )
     .map_err(|_| Error::Draft("cannot serialize comment preview".into()))
+}
+
+const SCHEMA: u32 = 2;
+const LEGACY_SCHEMA: u32 = 1;
+
+fn expected_body(record: &Comment) -> H1Result<String> {
+    match record.schema_version {
+        SCHEMA => graphql::request_body(&record.report_id, &record.message),
+        LEGACY_SCHEMA => legacy_request_body(&record.message),
+        _ => Err(Error::Draft("unsupported comment ledger version".into())),
+    }
+}
+
+fn transport(record: &Comment) -> &'static str {
+    if record.schema_version == SCHEMA {
+        "graphql"
+    } else {
+        "customer_rest_legacy"
+    }
 }
 
 fn check_message(message: &str) -> H1Result<()> {
@@ -82,18 +102,20 @@ fn decode(value: Value, id: &str) -> H1Result<Comment> {
             .confirmation_token
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    if record.schema_version != 1
+    if !matches!(record.schema_version, SCHEMA | LEGACY_SCHEMA)
         || record.comment_id != id
         || record.account.is_empty()
         || !valid_token
         || check_message(&record.message).is_err()
-        || record.request_body != request_body(&record.message)?
         || (record.state == State::Prepared) != record.attempted_at.is_none()
         || (record.state == State::Submitted) != record.activity_id.is_some()
     {
         return Err(bad());
     }
     validate_report_id(&record.report_id)?;
+    if record.request_body != expected_body(&record)? {
+        return Err(bad());
+    }
     if let Some(activity) = &record.activity_id {
         validate_report_id(activity)?;
     }
@@ -106,7 +128,7 @@ fn encode(record: &Comment) -> H1Result<Value> {
 
 fn receipt(record: &Comment) -> Value {
     json!({"source":"local_comment", "untrusted_content":true, "guidance":GUIDANCE,
-        "comment": {"comment_id":record.comment_id,"account":record.account,"state":record.state,
+        "comment": {"comment_id":record.comment_id,"account":record.account,"state":record.state,"transport":transport(record),
             "report_id":record.report_id,"public":true,"prepared_at":record.prepared_at,"attempted_at":record.attempted_at,
             "activity_id":record.activity_id,"report_url":format!("https://hackerone.com/reports/{}", record.report_id),
             "outcome_uncertain":matches!(record.state, State::Attempting | State::Unknown),"failure":record.failure}})
@@ -146,6 +168,9 @@ impl HackerOneServer {
         let id = p.comment_id.clone();
         let mut record = self.drafts.workflow_transaction(&id.clone(), None, move |old, _| {
             let mut record = decode(old.ok_or_else(|| Error::Validation("prepare a comment preview first".into()))?, &id)?;
+            if record.schema_version != SCHEMA && record.state == State::Prepared {
+                return Err(Error::Validation("this is a legacy Customer REST preview and cannot be sent over GraphQL; inspect report_comment_get and HackerOne, then prepare a new comment preview".into()));
+            }
             if record.state != State::Prepared {
                 return Err(Error::Validation("this comment_id already has a consumed attempt; inspect report_comment_get and HackerOne; never retry automatically".into()));
             }
@@ -215,7 +240,7 @@ impl HackerOneServer {
 #[tool_router(router = comment_router, vis = "pub(super)")]
 impl HackerOneServer {
     #[tool(
-        description = "Prepare a LOCAL exact preview of a PUBLIC (internal=false) report comment via the Customer API, bound to this account. No POST occurs. Show the complete message to the user and get explicit approval before report_comment_submit. Sending needs Customer API credentials with Report Management permission."
+        description = "Prepare a LOCAL exact preview of a PUBLIC (internal=false) report comment via researcher GraphQL, bound to this account. No request is sent. Show the complete message to the user and get explicit approval before report_comment_submit. Sending uses your personal researcher API token through GraphQL."
     )]
     pub async fn report_comment_prepare(
         &self,
@@ -224,11 +249,11 @@ impl HackerOneServer {
         validate_report_id(&p.report_id)?;
         check_message(&p.message)?;
         let account = self.h1()?.account_username().to_owned();
-        let body = request_body(&p.message)?;
+        let body = graphql::request_body(&p.report_id, &p.message)?;
         let token = super::submissions::token()?;
         let id = format!("comment-{}", random_token(24));
         let record = Comment {
-            schema_version: 1,
+            schema_version: SCHEMA,
             comment_id: id.clone(),
             account,
             state: State::Prepared,
@@ -255,14 +280,14 @@ impl HackerOneServer {
         super::api::render(
             &json!({"source":"local_comment_preview","untrusted_content":true,"never_sent":true,
             "guidance":GUIDANCE,"submission_enabled":self.allow_submit,"comment_id":record.comment_id,
-            "account":record.account,"report_id":record.report_id,"public":true,"method":"POST",
-            "endpoint":format!("https://api.hackerone.com/v1/reports/{}/activities", record.report_id),
+            "account":record.account,"report_id":record.report_id,"public":true,"method":"POST","transport":"graphql","operation":graphql::OPERATION,
+            "endpoint":graphql::ENDPOINT,
             "confirmation_token":record.confirmation_token,"request_body":body,"request_body_json":record.request_body}),
         )
     }
 
     #[tool(
-        description = "Post an approved PUBLIC comment preview once, after explicit user approval. Requires H1_MCP_ALLOW_SUBMIT=true and Customer API credentials with Report Management permission.",
+        description = "Post an approved PUBLIC comment preview once, after explicit user approval. Requires H1_MCP_ALLOW_SUBMIT=true; uses researcher GraphQL. Legacy schema-1 previews are refused; prepare a new one.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,

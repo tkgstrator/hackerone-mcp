@@ -2,6 +2,7 @@
 //! endpoints, bounded GET retries/pagination/response sizes, and one-shot report POST.
 
 mod endpoint;
+pub(crate) mod graphql;
 #[cfg(test)]
 mod hacktivity_tests;
 #[cfg(test)]
@@ -25,6 +26,7 @@ pub(crate) use endpoint::{validate_handle, validate_report_id};
 use retry::{RetryPolicy, parse_retry_after};
 
 const ORIGIN: &str = "https://api.hackerone.com";
+const GRAPHQL_ORIGIN: &str = "https://hackerone.com/";
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PAGES: usize = 20;
 const MAX_TOTAL_BYTES: usize = 5 * 1024 * 1024;
@@ -51,6 +53,7 @@ pub struct H1Client {
     username: String,
     api_key: String,
     origin: Url,
+    graphql_origin: Url,
     retry: RetryPolicy,
     limits: Limits,
 }
@@ -70,10 +73,24 @@ impl H1Client {
 
     pub fn new(creds: &Credentials) -> Result<Self> {
         let origin = Url::parse(ORIGIN).map_err(|e| Error::Config(e.to_string()))?;
-        Self::build(creds, origin, RetryPolicy::default(), Limits::production())
+        let graphql_origin =
+            Url::parse(GRAPHQL_ORIGIN).map_err(|e| Error::Config(e.to_string()))?;
+        Self::build(
+            creds,
+            origin,
+            graphql_origin,
+            RetryPolicy::default(),
+            Limits::production(),
+        )
     }
 
-    fn build(creds: &Credentials, origin: Url, retry: RetryPolicy, limits: Limits) -> Result<Self> {
+    fn build(
+        creds: &Credentials,
+        origin: Url,
+        graphql_origin: Url,
+        retry: RetryPolicy,
+        limits: Limits,
+    ) -> Result<Self> {
         let http = http_builder(retry.request_timeout)
             .build()
             .map_err(|_| Error::Config("failed to build HTTP client".into()))?;
@@ -89,6 +106,7 @@ impl H1Client {
             username: creds.username.clone(),
             api_key: creds.api_key.clone(),
             origin,
+            graphql_origin,
             retry,
             limits,
         })
@@ -103,7 +121,7 @@ impl H1Client {
             retry_after_cap: Duration::from_millis(50),
             ..RetryPolicy::default()
         };
-        Self::build(creds, origin, retry, Limits::production())
+        Self::build(creds, origin.clone(), origin, retry, Limits::production())
     }
 
     pub async fn programs(&self, page: PageParams) -> Result<Value> {
@@ -127,46 +145,78 @@ impl H1Client {
     /// No error includes API response text, request bytes or credentials.
     pub async fn submit_report(&self, body: String) -> Result<Value> {
         let url = Endpoint::CreateReport.url(&self.origin)?;
-        self.post_once(url, body, "report").await
+        let value = self.post_once(url, body, None).await?;
+        let valid = value.pointer("/data/type").and_then(Value::as_str) == Some("report")
+            && value
+                .pointer("/data/id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| validate_report_id(id).is_ok());
+        if !valid {
+            return Err(submission_uncertain("invalid report receipt"));
+        }
+        Ok(value)
     }
 
-    /// Customer API public comment (`POST /v1/reports/{id}/activities`), once.
-    /// Same durable-claim contract as `submit_report`; the receipt must be an
-    /// `activity-comment`. Needs Customer API credentials with Report Management.
+    /// Public comment through the researcher GraphQL endpoint, once. Same
+    /// durable-claim contract as `submit_report`. `body` must be the exact
+    /// preview bytes of the fixed mutation; the returned value is a normalized
+    /// `activity-comment` receipt, produced only after the GraphQL result matches.
     pub async fn post_report_comment(&self, report_id: &str, body: String) -> Result<Value> {
-        let url = Endpoint::CreateComment { id: report_id }.url(&self.origin)?;
-        self.post_once(url, body, "activity-comment").await
+        validate_report_id(report_id)?;
+        let request: Value = serde_json::from_str(&body)
+            .map_err(|_| Error::Validation("comment request is not valid JSON".into()))?;
+        if request
+            .pointer("/variables/reportId")
+            .and_then(Value::as_str)
+            != Some(graphql::report_global_id(report_id).as_str())
+            || request.get("operationName").and_then(Value::as_str) != Some(graphql::OPERATION)
+            || request.get("query").and_then(Value::as_str) != Some(graphql::MUTATION)
+            || request.pointer("/variables/internal") != Some(&Value::Bool(false))
+        {
+            return Err(Error::Validation(
+                "comment request does not match the report".into(),
+            ));
+        }
+        let auth = graphql::bearer(&self.username, &self.api_key);
+        let value = self
+            .post_once(
+                self.graphql_origin
+                    .join("graphql")
+                    .map_err(|e| Error::Config(e.to_string()))?,
+                body,
+                Some(auth),
+            )
+            .await?;
+        let id = graphql::accepted_activity_id(&value, &request).map_err(|reason| {
+            submission_uncertain(&format!("invalid activity-comment receipt ({reason})"))
+        })?;
+        Ok(serde_json::json!({"data": {"type": "activity-comment", "id": id}}))
     }
 
-    async fn post_once(&self, url: Url, body: String, receipt_type: &str) -> Result<Value> {
+    async fn post_once(&self, url: Url, body: String, bearer: Option<String>) -> Result<Value> {
         tokio::time::timeout(self.retry.request_timeout, async {
             #[expect(
                 clippy::disallowed_methods,
                 reason = "the typed POSTs use a durable claim, explicit opt-in and no retries"
             )]
-            let response = self
+            let request = self
                 .post_http
                 .post(url)
-                .basic_auth(&self.username, Some(&self.api_key))
                 .header(reqwest::header::ACCEPT, "application/json")
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body)
+                .body(body);
+            let request = match bearer {
+                Some(value) => request.header(reqwest::header::AUTHORIZATION, value),
+                None => request.basic_auth(&self.username, Some(&self.api_key)),
+            };
+            let response = request
                 .send()
                 .await
                 .map_err(|_| submission_uncertain("transport failure"))?;
             let status = response.status();
             if !status.is_success() {
                 // Do not read or quote an error body: it can echo the report.
-                let hint = if receipt_type == "activity-comment" && matches!(status.as_u16(), 401 | 403)
-                {
-                    "; Customer API credentials with Report Management permission are required (permission denied)"
-                } else {
-                    ""
-                };
-                return Err(submission_uncertain(&format!(
-                    "HTTP {}{hint}",
-                    status.as_u16()
-                )));
+                return Err(submission_uncertain(&format!("HTTP {}", status.as_u16())));
             }
             let bytes = self.read_body(response).await.map_err(|_| {
                 submission_uncertain(&format!(
@@ -174,21 +224,9 @@ impl H1Client {
                     status.as_u16()
                 ))
             })?;
-            let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            serde_json::from_slice(&bytes).map_err(|_| {
                 submission_uncertain(&format!("HTTP {} invalid JSON response", status.as_u16()))
-            })?;
-            let valid = value.pointer("/data/type").and_then(Value::as_str) == Some(receipt_type)
-                && value
-                    .pointer("/data/id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| validate_report_id(id).is_ok());
-            if !valid {
-                return Err(submission_uncertain(&format!(
-                    "HTTP {} invalid {receipt_type} receipt",
-                    status.as_u16()
-                )));
-            }
-            Ok(value)
+            })
         })
         .await
         .map_err(|_| submission_uncertain("request timed out"))?

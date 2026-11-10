@@ -16,7 +16,7 @@ pub mod reports;
 pub mod submissions;
 
 const INSTRUCTIONS: &str = "hackerone-mcp reads HackerOne API data and stores local report and reply drafts. \
-Only report_submit can send a report and only report_comment_submit can post a public Customer API comment, both only with H1_MCP_ALLOW_SUBMIT=true. \
+Only report_submit can send a report and only report_comment_submit can post a public GraphQL comment, both only with H1_MCP_ALLOW_SUBMIT=true. \
 Show the complete prepared recipient/body and receive explicit user approval before calling report_submit or report_comment_submit; a preview token is not approval. \
 A consumed attempt must never be automatically retried; inspect its receipt and HackerOne if uncertain. \
 Reply drafts must be sent manually in the HackerOne web UI. \
