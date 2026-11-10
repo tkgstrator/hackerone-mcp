@@ -8,12 +8,14 @@ HackerOne Hacker API, tracks submitted reports and stores drafts as files on you
 
 Remote submission is disabled by default. Enable `H1_MCP_ALLOW_SUBMIT=true` to use
 `report_submit` after reviewing a prepared preview and explicitly approving its recipient and body.
-Preparation, validation and all other draft operations send nothing to HackerOne. Comments remain
-local reply drafts for manual sending in the HackerOne web UI.
+Preparation, validation and all other draft operations send nothing to HackerOne. Reply drafts
+(`report_reply_draft`) remain local for manual sending in the HackerOne web UI. Public report comments
+are separate: `report_comment_submit` posts one approved comment through the researcher GraphQL endpoint
+using your personal API token, only with `H1_MCP_ALLOW_SUBMIT=true`.
 
-HTTP code stays in `src/client/`, with a fixed `https://api.hackerone.com` origin and redirects
+HTTP code stays in `src/client/`, with a fixed `https://api.hackerone.com` origin (plus the fixed `https://hackerone.com/graphql` origin for comments) and redirects
 disabled. Reads retain bounded retries; report submission uses a separate client with retries
-disabled and a persistent single-attempt ledger. Guard tests pin all 24 tools and submission annotations.
+disabled and a persistent single-attempt ledger. Guard tests pin all 27 tools and submission annotations.
 
 ## Tools
 
@@ -30,6 +32,9 @@ disabled and a persistent single-attempt ledger. Guard tests pin all 24 tools an
 | `report_submit_prepare`      | Validate and persist an exact submission preview; no POST | `draft_id`, `expected_revision` |
 | `report_submit`              | Submit the explicitly approved preview once; requires opt-in | `draft_id`, `expected_revision`, `confirmation_token`, `confirm` |
 | `report_submission_get`      | Read the local submission receipt or uncertain status | `draft_id` |
+| `report_comment_prepare`     | Preview an exact PUBLIC report comment (researcher GraphQL); nothing is sent | `report_id`, `message` |
+| `report_comment_submit`      | Post the approved comment once; requires opt-in; uses your researcher token | `comment_id`, `confirmation_token`, `confirm` |
+| `report_comment_get`         | Read the local comment receipt or uncertain status | `comment_id` |
 | `program_discover`           | Discover eligible iOS programs from a bounded source page       | `page`, `page_size`, `public_only`, `accepting_submissions_only`, `bounty_only` |
 | `program_list`               | List programs visible to your account (needs credentials)       | `page`, `page_size`                                                                                                                                                                            |
 | `program_get`                | Get one program incl. policy and submission state               | `handle`                                                                                                                                                                                       |
@@ -133,9 +138,28 @@ One baseline is retained per report in a volume; switching API accounts starts a
 
 Reply text is stored locally (nonblank, no NUL, up to 200,000 UTF-8 bytes). The returned fixed report
 URL is for manually sending it in the web UI. The public [Hacker API](https://api.hackerone.com/hacker-resources/)
-does not document comment creation; this server does not use the separate Customer API or browser cookies.
+does not document comment creation; replies stay local drafts. Public comments use the separate `report_comment_*` tools.
 Snapshots retain at most 1000 observed activity IDs and 8 MiB of private JSON. Exceeding a bound fails
 without advancing; use `report_get` to inspect the current API response directly.
+
+## Public report comments (researcher GraphQL)
+
+`report_comment_prepare` stores an account-bound exact preview of one fixed GraphQL mutation
+(`AddCommentToHackerOneReport`, `createActivityComment`) for `https://hackerone.com/graphql` with
+`internal: false` (public within the report's existing audience). Preparation is offline: the report's
+GraphQL node ID is `base64("gid://hackerone/Report/<id>")`. `report_comment_submit` (needs
+`H1_MCP_ALLOW_SUBMIT=true`, `confirm=true`, `comment_id` and token) consumes the attempt durably before
+one POST using `Authorization: Bearer base64(username:api_key)`, with no retries, redirects, cookies or
+Customer API fallback. `report_comment_get` reads the receipt. HTTP 200 alone is not success: there
+must be no GraphQL or mutation errors, `was_successful`, and an `ActivitiesComment` receipt with a
+numeric ID, matching message and an explicit `internal=false` or `internal=null`; otherwise the
+attempt is recorded as uncertain. The schema permits a nullable `internal` response. Receipts expose
+`visibility_confirmed`: `true` when the response explicitly returns `internal=false`, `false` when
+it returns `null`, or `null` for older records and attempts without an accepted receipt. A `false`
+or `null` confirmation does not confirm visibility; `public: true` describes the requested audience.
+The request always sends `internal: false`. Errors never quote server text. Schema-1 (v0.6.0,
+Customer REST) ledgers remain readable but their previews cannot be submitted; prepare a new comment
+after inspecting the old outcome.
 
 ## Preparing and submitting a report
 
@@ -406,7 +430,7 @@ bun install --frozen-lockfile --ignore-scripts && bunx commitlint --last --verbo
 ```
 
 `tests/stdio_e2e.rs` spawns the real binary and talks JSON-RPC over stdio. `scripts/docker-smoke.sh`
-starts the image, checks `initialize`, that `tools/list` returns 24 tools, and a `draft_create` /
+starts the image, checks `initialize`, that `tools/list` returns 27 tools, and a `draft_create` /
 `draft_get` round trip.
 
 ### Commits
