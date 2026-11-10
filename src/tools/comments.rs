@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const GUIDANCE: &str = "This posts a PUBLIC (internal=false) comment within the report's existing audience through the HackerOne GraphQL API (https://hackerone.com/graphql) using your personal researcher API token. Only call report_comment_submit after showing the exact preview and receiving explicit user approval; a preview token is not proof of approval. Each comment_id is a single attempt, never retried; if uncertain, inspect HackerOne before preparing a new comment.";
+const GUIDANCE: &str = "This requests a PUBLIC (internal=false) comment within the report's existing audience through the HackerOne GraphQL API (https://hackerone.com/graphql) using your personal researcher API token. public describes the requested audience; visibility_confirmed=true means the receipt explicitly returned internal=false, while false or null does not confirm visibility. Only call report_comment_submit after showing the exact preview and receiving explicit user approval; a preview token is not proof of approval. Each comment_id is a single attempt, never retried; if uncertain, inspect HackerOne before preparing a new comment.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +35,8 @@ struct Comment {
     prepared_at: u64,
     attempted_at: Option<u64>,
     activity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visibility_confirmed: Option<bool>,
     failure: Option<String>,
 }
 
@@ -131,6 +133,7 @@ fn receipt(record: &Comment) -> Value {
         "comment": {"comment_id":record.comment_id,"account":record.account,"state":record.state,"transport":transport(record),
             "report_id":record.report_id,"public":true,"prepared_at":record.prepared_at,"attempted_at":record.attempted_at,
             "activity_id":record.activity_id,"report_url":format!("https://hackerone.com/reports/{}", record.report_id),
+            "visibility_confirmed":record.visibility_confirmed,
             "outcome_uncertain":matches!(record.state, State::Attempting | State::Unknown),"failure":record.failure}})
 }
 
@@ -194,6 +197,13 @@ impl HackerOneServer {
                             Error::Http("comment outcome uncertain; inspect HackerOne".into())
                         })?
                         .to_owned(),
+                );
+                record.visibility_confirmed = Some(
+                    response["data"]["visibility_confirmed"]
+                        .as_bool()
+                        .ok_or_else(|| {
+                            Error::Http("comment outcome uncertain; inspect HackerOne".into())
+                        })?,
                 );
                 record.state = State::Submitted;
             }
@@ -264,6 +274,7 @@ impl HackerOneServer {
             prepared_at: now_secs(),
             attempted_at: None,
             activity_id: None,
+            visibility_confirmed: None,
             failure: None,
         };
         let value = encode(&record)?;

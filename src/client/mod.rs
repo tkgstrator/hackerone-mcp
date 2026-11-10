@@ -187,10 +187,13 @@ impl H1Client {
                 Some(auth),
             )
             .await?;
-        let id = graphql::accepted_activity_id(&value, &request).map_err(|reason| {
+        let receipt = graphql::accepted_activity_receipt(&value, &request).map_err(|reason| {
             submission_uncertain(&format!("invalid activity-comment receipt ({reason})"))
         })?;
-        Ok(serde_json::json!({"data": {"type": "activity-comment", "id": id}}))
+        Ok(
+            serde_json::json!({"data": {"type": "activity-comment", "id": receipt.id,
+            "visibility_confirmed": receipt.visibility_confirmed}}),
+        )
     }
 
     async fn post_once(&self, url: Url, body: String, bearer: Option<String>) -> Result<Value> {

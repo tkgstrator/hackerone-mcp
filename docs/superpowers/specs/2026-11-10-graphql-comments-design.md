@@ -10,7 +10,7 @@ c0d2f908c46082dce1e1e1287d435962469efdee. Read config.yaml, README.md and
 graphql/operations/AddCommentToHackerOneReport.graphql. It uses
 Authorization: Bearer base64(username:api_key) and createActivityComment with
 report_id (GraphQL global ID), message and internal=false. The canonical report
-global ID observed live decodes to gid://hackerone/Report/4185221. Local generation
+global ID observed live decodes to gid://hackerone/Report/<id>. Local generation
 of that canonical global ID preserves preparation as an offline operation.
 
 Use one fixed mutation and operationName. New previews retain its exact JSON bytes
@@ -22,7 +22,11 @@ do not introduce custom encoding or additional dependencies.
 
 A successful HTTP status alone is insufficient. Require no GraphQL errors,
 was_successful=true, no mutation validation errors, and an ActivitiesComment
-receipt with a canonical numeric activity ID and matching message/internal=false.
+receipt with a canonical numeric activity ID and matching message. Requests always
+set internal=false. The response field is nullable: explicit false confirms the
+requested visibility, explicit null means visibility was not returned, and missing,
+true or malformed values remain invalid. Persist optional visibility_confirmed
+as true/false respectively; older receipts without this field remain readable.
 Normalize that accepted receipt for the existing workflow. Never quote raw HTTP
 or GraphQL error bodies, credentials, or encoded authorization in errors. Never
 retry or follow redirects for a mutation, including HTTP 200 GraphQL errors.
@@ -42,5 +46,6 @@ preserving the earlier consumed REST receipt. The exact comment is:
 
 The WAVE1 restriction is not limited to Goldie Seeking. In WAVE1 Rush, there is also a direction that is never selected for the initial enemy spawn.
 
-Bump the local patch version to 0.6.1. This is a bounded transport correction using
+Bump the local patch version to 0.6.1, followed by 0.6.2 for the live nullable-response
+compatibility fix. This is a bounded transport correction using
 the existing workflow, not a general GraphQL proxy or a new authentication system.

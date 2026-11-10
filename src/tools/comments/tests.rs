@@ -170,8 +170,91 @@ async fn submit_sends_exact_bytes_once_and_receipt_survives_restart() {
     let receipt = get(&restarted, &p).await;
     assert_eq!(receipt["comment"]["state"], "submitted");
     assert_eq!(receipt["comment"]["activity_id"], "987");
+    assert_eq!(receipt["comment"]["visibility_confirmed"], true);
     assert!(restarted.report_comment_submit(args(&p)).await.is_err());
     assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn explicit_null_visibility_submits_once_and_survives_restart_as_unconfirmed() {
+    let mock = MockServer::start().await;
+    let mut response = gql_ok("Public note");
+    response["data"]["createActivityComment"]["activity"]["internal"] = Value::Null;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("authorization", BEARER))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let (temp, server) = fixture(&mock).await;
+    let p = prepare(&server, "Public note").await;
+    let receipt: Value =
+        serde_json::from_str(&server.report_comment_submit(args(&p)).await.unwrap()).unwrap();
+    assert_eq!(receipt["comment"]["state"], "submitted");
+    assert_eq!(receipt["comment"]["activity_id"], "987");
+    assert_eq!(receipt["comment"]["visibility_confirmed"], false);
+    assert_eq!(receipt["comment"]["public"], true);
+    assert_eq!(receipt["comment"]["outcome_uncertain"], false);
+    let stored = server
+        .drafts
+        .workflow_read(p["comment_id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored["activity_id"], "987");
+    assert_eq!(stored["visibility_confirmed"], false);
+    drop(server);
+    let restarted = server_for(&temp, &mock, "test-user", true);
+    assert_eq!(get(&restarted, &p).await, receipt);
+    assert!(restarted.report_comment_submit(args(&p)).await.is_err());
+    let requests = mock.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let request: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(request["variables"]["internal"], false);
+}
+
+#[tokio::test]
+async fn invalid_visibility_consumes_attempt_and_remains_unknown_after_restart() {
+    for internal in [
+        None,
+        Some(json!(true)),
+        Some(json!("false")),
+        Some(json!(0)),
+    ] {
+        let mock = MockServer::start().await;
+        let mut response = gql_ok("Public note");
+        let activity = response["data"]["createActivityComment"]["activity"]
+            .as_object_mut()
+            .unwrap();
+        match internal {
+            Some(value) => {
+                activity.insert("internal".into(), value);
+            }
+            None => {
+                activity.remove("internal");
+            }
+        }
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let (temp, server) = fixture(&mock).await;
+        let p = prepare(&server, "Public note").await;
+        let receipt: Value =
+            serde_json::from_str(&server.report_comment_submit(args(&p)).await.unwrap()).unwrap();
+        assert_eq!(receipt["comment"]["state"], "unknown");
+        assert!(receipt["comment"]["activity_id"].is_null());
+        assert!(receipt["comment"]["visibility_confirmed"].is_null());
+        assert_eq!(receipt["comment"]["outcome_uncertain"], true);
+        drop(server);
+        let restarted = server_for(&temp, &mock, "test-user", true);
+        assert_eq!(get(&restarted, &p).await, receipt);
+        assert!(restarted.report_comment_submit(args(&p)).await.is_err());
+        assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]
@@ -339,11 +422,60 @@ async fn schema1_rest_receipts_remain_readable_and_immutable() {
     let receipt = get(&server, &p).await;
     assert_eq!(receipt["comment"]["state"], "submitted");
     assert_eq!(receipt["comment"]["activity_id"], "987");
+    assert!(
+        receipt["comment"]
+            .get("visibility_confirmed")
+            .unwrap()
+            .is_null()
+    );
     assert!(server.report_comment_submit(args(&p)).await.is_err());
     let unknown = store_legacy(&server, "unknown", None).await;
     assert_eq!(
         get(&server, &unknown).await["comment"]["outcome_uncertain"],
         true
+    );
+    assert!(mock.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn schema2_receipt_without_visibility_field_remains_readable_and_consumed() {
+    let mock = MockServer::start().await;
+    let (temp, server) = fixture(&mock).await;
+    let p = prepare(&server, "Public note").await;
+    let id = p["comment_id"].as_str().unwrap().to_owned();
+    server
+        .drafts
+        .workflow_transaction(&id, None, |old, _| {
+            let mut record = old.unwrap();
+            record["state"] = json!("submitted");
+            record["attempted_at"] = json!(1_700_000_001u64);
+            record["activity_id"] = json!("987");
+            record
+                .as_object_mut()
+                .unwrap()
+                .remove("visibility_confirmed");
+            Ok((Some(record), ()))
+        })
+        .await
+        .unwrap();
+    drop(server);
+    let restarted = server_for(&temp, &mock, "test-user", true);
+    let receipt = get(&restarted, &p).await;
+    assert_eq!(receipt["comment"]["state"], "submitted");
+    assert_eq!(receipt["comment"]["activity_id"], "987");
+    assert!(
+        receipt["comment"]
+            .get("visibility_confirmed")
+            .unwrap()
+            .is_null()
+    );
+    assert!(restarted.report_comment_submit(args(&p)).await.is_err());
+    let stored = restarted.drafts.workflow_read(&id).await.unwrap().unwrap();
+    assert!(
+        !stored
+            .as_object()
+            .unwrap()
+            .contains_key("visibility_confirmed")
     );
     assert!(mock.received_requests().await.unwrap().is_empty());
 }

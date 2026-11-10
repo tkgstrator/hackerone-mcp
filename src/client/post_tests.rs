@@ -193,11 +193,36 @@ async fn comment_post_uses_graphql_bearer_with_exact_bytes() {
     // The accepted receipt is normalized for the existing workflow.
     assert_eq!(value["data"]["type"], "activity-comment");
     assert_eq!(value["data"]["id"], "987");
+    assert_eq!(value["data"]["visibility_confirmed"], true);
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body, comment_body().as_bytes());
     assert!(requests[0].url.query().is_none());
     assert!(!requests[0].headers.contains_key("cookie"));
+}
+
+#[tokio::test]
+async fn comment_explicit_null_visibility_accepts_receipt_without_confirming_visibility() {
+    let server = MockServer::start().await;
+    let mut response = gql_accepted();
+    response["data"]["createActivityComment"]["activity"]["internal"] = Value::Null;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let value = client(&server)
+        .post_report_comment("12345", comment_body())
+        .await
+        .unwrap();
+    assert_eq!(value["data"]["type"], "activity-comment");
+    assert_eq!(value["data"]["id"], "987");
+    assert_eq!(value["data"]["visibility_confirmed"], false);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let request: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(request["variables"]["internal"], false);
 }
 
 #[tokio::test]
@@ -363,6 +388,23 @@ async fn comment_success_requires_matching_activity_comment_receipt() {
             .to_string();
         assert!(error.contains("outcome uncertain"), "{error}");
         assert!(!error.contains("Different message"), "{error}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    for internal in [json!("false"), json!(0), json!([]), json!({})] {
+        let server = MockServer::start().await;
+        let mut response = gql_accepted();
+        response["data"]["createActivityComment"]["activity"]["internal"] = internal;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+        let error = client(&server)
+            .post_report_comment("12345", comment_body())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outcome uncertain"), "{error}");
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }

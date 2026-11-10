@@ -40,12 +40,18 @@ pub(crate) fn request_body(report_id: &str, message: &str) -> Result<String> {
     .map_err(|_| Error::Draft("cannot serialize comment preview".into()))
 }
 
-/// Check a response against the request. Returns the numeric activity ID, or a
-/// fixed reason (never server text).
-pub(crate) fn accepted_activity_id(
+pub(crate) struct AcceptedActivity {
+    pub(crate) id: String,
+    pub(crate) visibility_confirmed: bool,
+}
+
+/// Check a response against the request. Returns the numeric activity ID and
+/// whether the receipt explicitly confirms public visibility, or a fixed reason
+/// (never server text). The schema allows an explicit null `internal` value.
+pub(crate) fn accepted_activity_receipt(
     response: &Value,
     request: &Value,
-) -> std::result::Result<String, &'static str> {
+) -> std::result::Result<AcceptedActivity, &'static str> {
     if response.get("errors").is_some_and(|e| !e.is_null()) {
         return Err("GraphQL errors");
     }
@@ -75,13 +81,18 @@ pub(crate) fn accepted_activity_id(
     if message.is_none() || activity.get("message").and_then(Value::as_str) != message {
         return Err("receipt message mismatch");
     }
-    if activity.get("internal") != Some(&Value::Bool(false)) {
-        return Err("receipt visibility mismatch");
-    }
+    let visibility_confirmed = match activity.get("internal") {
+        Some(Value::Bool(false)) => true,
+        Some(Value::Null) => false,
+        _ => return Err("receipt visibility mismatch"),
+    };
     let id = activity
         .get("databaseId")
         .and_then(Value::as_str)
         .filter(|id| validate_report_id(id).is_ok())
         .ok_or("invalid activity ID")?;
-    Ok(id.to_owned())
+    Ok(AcceptedActivity {
+        id: id.to_owned(),
+        visibility_confirmed,
+    })
 }

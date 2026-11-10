@@ -152,9 +152,14 @@ GraphQL node ID is `base64("gid://hackerone/Report/<id>")`. `report_comment_subm
 one POST using `Authorization: Bearer base64(username:api_key)`, with no retries, redirects, cookies or
 Customer API fallback. `report_comment_get` reads the receipt. HTTP 200 alone is not success: there
 must be no GraphQL or mutation errors, `was_successful`, and an `ActivitiesComment` receipt with a
-numeric ID, matching message and `internal=false`; otherwise the attempt is recorded as uncertain.
-Errors never quote server text. Schema-1 (v0.6.0, Customer REST) ledgers remain readable but their
-previews cannot be submitted; prepare a new comment after inspecting the old outcome.
+numeric ID, matching message and an explicit `internal=false` or `internal=null`; otherwise the
+attempt is recorded as uncertain. The schema permits a nullable `internal` response. Receipts expose
+`visibility_confirmed`: `true` when the response explicitly returns `internal=false`, `false` when
+it returns `null`, or `null` for older records and attempts without an accepted receipt. A `false`
+or `null` confirmation does not confirm visibility; `public: true` describes the requested audience.
+The request always sends `internal: false`. Errors never quote server text. Schema-1 (v0.6.0,
+Customer REST) ledgers remain readable but their previews cannot be submitted; prepare a new comment
+after inspecting the old outcome.
 
 ## Preparing and submitting a report
 
